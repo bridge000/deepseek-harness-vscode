@@ -1,0 +1,320 @@
+{
+  "name": "dsh-review",
+  "displayName": "DSH Review",
+  "description": "把 DeepSeek Harness（DSH）接进 VS Code 侧边栏：聊天 + 代码审查（ACP 自动化接口）",
+  "version": "0.1.0",
+  "publisher": "xliang",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "code-review",
+    "acp"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:dshReview.chat"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "DSH 会在工作区运行工具并修改文件。"
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "dshReview",
+          "title": "DSH Review",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dshReview": [
+        {
+          "id": "dshReview.chat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dshReview.openChat",
+        "title": "DSH: 打开侧边栏",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.reviewFile",
+        "title": "DSH: 审查当前文件",
+        "category": "DSH",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "dshReview.reviewSelection",
+        "title": "DSH: 审查选中代码",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.reviewChanges",
+        "title": "DSH: 审查工作区改动",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.reviewStaged",
+        "title": "DSH: 审查暂存区改动",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.reviewCommit",
+        "title": "DSH: 审查某个提交",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.explainSelection",
+        "title": "DSH: 解释选中代码",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.fixFindings",
+        "title": "DSH: 修复最近审查发现的问题",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.showTurnChanges",
+        "title": "DSH: 查看本轮改动",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.clearFindings",
+        "title": "DSH: 清除审查结果",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.newSession",
+        "title": "DSH: 新建会话",
+        "category": "DSH",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dshReview.history",
+        "title": "DSH: 会话历史",
+        "category": "DSH",
+        "icon": "$(history)"
+      },
+      {
+        "command": "dshReview.restartRuntime",
+        "title": "DSH: 重启运行时",
+        "category": "DSH",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dshReview.diagnose",
+        "title": "DSH: 兼容性诊断",
+        "category": "DSH"
+      },
+      {
+        "command": "dshReview.configure",
+        "title": "DSH: 打开设置",
+        "category": "DSH"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "dshReview.reviewFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "dshReview.reviewFile",
+          "when": "resourceScheme == file",
+          "group": "dsh@1"
+        },
+        {
+          "command": "dshReview.reviewSelection",
+          "when": "editorHasSelection && resourceScheme == file",
+          "group": "dsh@2"
+        },
+        {
+          "command": "dshReview.explainSelection",
+          "when": "editorHasSelection && resourceScheme == file",
+          "group": "dsh@3"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dshReview.newSession",
+          "when": "view == dshReview.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dshReview.history",
+          "when": "view == dshReview.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dshReview.restartRuntime",
+          "when": "view == dshReview.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "dshReview.clearFindings",
+          "when": "view == dshReview.chat",
+          "group": "navigation@4"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "dshReview.openChat"
+        },
+        {
+          "command": "dshReview.reviewFile"
+        },
+        {
+          "command": "dshReview.reviewSelection"
+        },
+        {
+          "command": "dshReview.reviewChanges"
+        },
+        {
+          "command": "dshReview.reviewStaged"
+        },
+        {
+          "command": "dshReview.reviewCommit"
+        },
+        {
+          "command": "dshReview.explainSelection"
+        },
+        {
+          "command": "dshReview.fixFindings"
+        },
+        {
+          "command": "dshReview.showTurnChanges"
+        },
+        {
+          "command": "dshReview.clearFindings"
+        },
+        {
+          "command": "dshReview.newSession"
+        },
+        {
+          "command": "dshReview.history"
+        },
+        {
+          "command": "dshReview.restartRuntime"
+        },
+        {
+          "command": "dshReview.diagnose"
+        },
+        {
+          "command": "dshReview.configure"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DSH Review",
+      "properties": {
+        "dshReview.executable": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "`dsh` 可执行文件路径。留空自动探测（PATH / DSH 桌面端 / npx）。"
+        },
+        "dshReview.profile": {
+          "type": "string",
+          "default": "acp",
+          "markdownDescription": "启动的 DSH profile。留空则自动发现支持 ACP 的 profile（默认 `acp`）。"
+        },
+        "dshReview.permissionMode": {
+          "type": "string",
+          "enum": [
+            "workspace-write",
+            "read-only",
+            "danger-full-access"
+          ],
+          "default": "workspace-write",
+          "markdownDescription": "写入 `DSH_PERMISSION_MODE`。`read-only` 为严格模式：DSH 每次写文件/执行命令都会请求批准。修改后需重启运行时。"
+        },
+        "dshReview.autoApprove": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "all"
+          ],
+          "default": "ask",
+          "markdownDescription": "`ask` 逐次弹窗批准；`all` 自动允许所有权限请求（危险）。"
+        },
+        "dshReview.workspaceRootIndex": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "多根工作区时作为会话 cwd 的根目录下标（越界回退到第一个）。"
+        },
+        "dshReview.maxReviewChars": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 2000,
+          "description": "一次审查任务发送给 DSH 的最大字符数（超出按文件/行边界截断）。"
+        },
+        "dshReview.saveTranscriptLimit": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "本地保留的会话记录数量。"
+        },
+        "dshReview.showChangesNotice": {
+          "type": "boolean",
+          "default": true,
+          "description": "DSH 一轮结束后，若检测到工作区改动则提示（可查看原生 diff）。"
+        },
+        "dshReview.checkCompatOnVersionChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "检测到 DSH 版本变化时，后台运行兼容性自检并提示结果。"
+        },
+        "dshReview.compat.autoRepair": {
+          "type": "boolean",
+          "default": true,
+          "description": "ACP profile 启动失败时，允许提示用官方模板重建（会先备份原 profile）。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "compat": "node scripts/compat.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "package": "node scripts/build.mjs --production && vsce package --no-dependencies --out dsh-review.vsix"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.17",
+    "marked": "^18.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.25.12",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
