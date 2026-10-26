@@ -20,6 +20,9 @@ const Module = require('node:module');
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deepseek-harness-smoke-'));
 const cwd = projectRoot;
+const strictMode = process.env.SMOKE_STRICT === '1';
+const smokeWorkspace = strictMode ? fs.mkdtempSync(path.join(os.tmpdir(), 'deepseek-harness-ws-')) : cwd;
+const configOverrides = strictMode ? { permissionMode: 'read-only' } : {};
 
 const logs = [];
 const messages = [];
@@ -79,22 +82,36 @@ class ThemeColor {
 	}
 }
 
-function makeDocument(uri) {
-	const text = 'const a = 1;\nexport function add(a, b) {\n\treturn a + b;\n}\n';
+function makeDocument(uri, content) {
+	const text = content ?? 'const a = 1;\nexport function add(a, b) {\n\treturn a + b;\n}\n';
+	const lines = text.split(/\r?\n/);
 	return {
 		uri,
 		fileName: uri.fsPath,
 		languageId: 'typescript',
-		lineCount: 4,
+		lineCount: lines.length,
 		version: 1,
 		isDirty: false,
 		isUntitled: false,
 		getText: (range) => (range ? text.slice(0, 0) : text),
-		lineAt: (line) => ({ text: '', range: new Range(line, 0, line, 0) }),
+		lineAt: (line) => ({ text: lines[line] ?? '', range: new Range(line, 0, line, (lines[line] ?? '').length) }),
 		positionAt: () => new Position(0, 0),
 		offsetAt: () => 0,
 		save: async () => true,
 	};
+}
+
+function makeEditor(uri, content) {
+	return {
+		document: makeDocument(uri, content),
+		selection: { isEmpty: true, start: new Position(0, 0), end: new Position(0, 0) },
+	};
+}
+
+function focusedEditor() {
+	if (strictMode) return undefined;
+	const file = path.join(projectRoot, 'src', 'types.ts');
+	return makeEditor(Uri.file(file), fs.readFileSync(file, 'utf8'));
 }
 
 const commandHandlers = new Map();
@@ -137,7 +154,7 @@ function makeVscode() {
 			}
 		},
 		window: {
-			activeTextEditor: undefined,
+			activeTextEditor: focusedEditor(),
 			visibleTextEditors: [],
 			createOutputChannel: () => ({
 				appendLine: (line) => logs.push(String(line)),
@@ -173,6 +190,7 @@ function makeVscode() {
 			showQuickPick: async () => undefined,
 			showTextDocument: async (uri) => ({ uri, document: makeDocument(uri), selection: undefined }),
 			onDidChangeActiveTextEditor: () => ({ dispose: () => undefined }),
+			onDidChangeTextEditorSelection: () => ({ dispose: () => undefined }),
 		},
 		commands: {
 			registerCommand: (id, handler) => {
@@ -205,10 +223,11 @@ function makeVscode() {
 			openExternal: async () => true,
 		},
 		workspace: {
-			workspaceFolders: [{ uri: Uri.file(cwd), name: path.basename(cwd), index: 0 }],
+			workspaceFolders: [{ uri: Uri.file(smokeWorkspace), name: path.basename(smokeWorkspace), index: 0 }],
 			textDocuments: [],
 			getConfiguration: (section) => ({
-				get: (key, fallback) => (section === 'deepseekHarness' ? fallback : fallback),
+				get: (key, fallback) =>
+					Object.prototype.hasOwnProperty.call(configOverrides, key) ? configOverrides[key] : fallback,
 				has: () => false,
 				inspect: () => undefined,
 				update: async () => undefined,
@@ -248,7 +267,7 @@ const context = {
 	subscriptions: [],
 	extensionUri: Uri.file(projectRoot),
 	extensionPath: projectRoot,
-	extension: { packageJSON: { version: '0.1.0' } },
+	extension: { packageJSON: { version: '0.2.0' } },
 	globalStorageUri: Uri.file(storageDir),
 	storageUri: Uri.file(storageDir),
 	globalState: {
@@ -353,6 +372,15 @@ async function main() {
 	check(typeof state.runtime.dshVersion === 'string' && state.runtime.dshVersion.length > 0, `DSH 版本=${state.runtime.dshVersion}`);
 	check(state.runtime.capabilities.sessionList === true, 'session/list 能力可用');
 
+	console.log('  … 自动上下文检查');
+	const autoContextMessage = posted.filter((message) => message.type === 'autoContext').pop();
+	if (strictMode) {
+		check(autoContextMessage?.info?.kind === 'none', '严格模式（无焦点编辑器）自动上下文为空');
+	} else {
+		check(autoContextMessage?.info?.kind !== 'none', `自动上下文已推送：${JSON.stringify(autoContextMessage?.info ?? null).slice(0, 140)}`);
+		check(String(autoContextMessage?.info?.path ?? '').includes('types.ts'), '自动上下文指向当前焦点文件');
+	}
+
 	console.log('  … 通过侧边栏协议发送一条真实消息');
 	receiveFromWebview({ type: 'send', text: '请只回复两个字：收到。' });
 	await waitFor(
@@ -372,30 +400,65 @@ async function main() {
 	check(Array.isArray(afterTurn.history), '历史会话字段存在');
 	check(!posted.some((message) => message.type === 'error'), '没有向 webview 推送错误消息');
 
-	console.log('  … 切换推理强度');
-	const reasoning = afterTurn.configOptions.find((option) => option.category === 'thought_level' || option.id === 'reasoning_effort');
-	if (reasoning) {
-		const target = reasoning.values.find((value) => value.value === 'low') ?? reasoning.values[0];
-		receiveFromWebview({ type: 'setConfig', configId: reasoning.id, value: target.value });
-		await delay(2000);
-		const updated = lastState()?.configOptions.find((option) => option.id === reasoning.id);
-		check(updated?.currentValue === target.value, `推理强度切换为 ${target.value}`);
-	} else {
-		check(true, '运行时不提供 reasoning 配置，跳过切换');
-	}
-
-	console.log('  … 运行一次真实代码审查');
-	const reviewUri = Uri.file(path.join(cwd, 'src', 'types.ts'));
-	await commandHandlers.get('deepseekHarness.reviewFile')(reviewUri);
-	await waitFor(() => posted.some((message) => message.type === 'findings'), 180000, '审查结果推送到侧边栏');
-	const findingsMessage = posted.filter((message) => message.type === 'findings').pop();
-	check(Array.isArray(findingsMessage.findings), `审查结果已推送（findings=${findingsMessage.findings.length}）`);
-	check(!posted.some((message) => message.type === 'error'), '审查过程无错误');
-	const reviewState = lastState();
+	const modelOption = afterTurn.configOptions.find((option) => option.category === 'model' || option.id === 'model');
+	const modelValues = modelOption?.values ?? [];
+	check(!modelValues.some((value) => String(value.value).includes('deepseek-v4-flash')), '模型列表已隐藏旧名 deepseek-v4-flash');
+	check(!String(modelOption?.currentValue ?? '').includes('deepseek-v4-flash'), `当前模型已不是旧名：${String(modelOption?.currentValue ?? '')}`);
+	check(modelValues.some((value) => String(value.value).includes('deepseek-flash')), '模型列表包含 DeepSeek-V4.1-Flash');
 	check(
-		reviewState.transcript.some((entry) => entry.kind === 'user' && String(entry.text).includes('审查')),
-		'审查请求出现在会话记录里',
+		String(modelOption?.currentValue ?? '').includes(`deepseek-flash`),
+		'已按 DSH 设置自动选择 DeepSeek-V4.1-Flash',
 	);
+
+	if (strictMode) {
+		console.log('  … 严格模式权限卡片（read-only 写文件）');
+		const target = path.join(smokeWorkspace, 'smoke-permission.txt');
+		receiveFromWebview({
+			type: 'send',
+			text: '请在工作区根目录创建一个名为 smoke-permission.txt 的文件，内容为 hello。完成后只回复 OK。',
+		});
+		const handled = new Set();
+		const deadline = Date.now() + 240000;
+		while (Date.now() < deadline && !fs.existsSync(target)) {
+			const permission = posted
+				.filter((message) => message.type === 'permission')
+				.find((message) => message.request && !handled.has(message.request.id));
+			if (permission) {
+				handled.add(permission.request.id);
+				check(Array.isArray(permission.request.options) && permission.request.options.length > 0, '权限卡片带有选项');
+				const allow = permission.request.options.find((option) => String(option.kind).startsWith('allow_')) ?? permission.request.options[0];
+				receiveFromWebview({ type: 'permissionResponse', requestId: permission.request.id, optionId: allow.optionId });
+			}
+			await delay(400);
+		}
+		check(fs.existsSync(target), '严格模式允许后文件已创建');
+		await waitFor(() => lastState()?.busy === false, 180000, '权限任务结束');
+	} else {
+		console.log('  … 切换推理强度');
+		const reasoning = afterTurn.configOptions.find((option) => option.category === 'thought_level' || option.id === 'reasoning_effort');
+		if (reasoning) {
+			const target = reasoning.values.find((value) => value.value === 'low') ?? reasoning.values[0];
+			receiveFromWebview({ type: 'setConfig', configId: reasoning.id, value: target.value });
+			await delay(2000);
+			const updated = lastState()?.configOptions.find((option) => option.id === reasoning.id);
+			check(updated?.currentValue === target.value, `推理强度切换为 ${target.value}`);
+		} else {
+			check(true, '运行时不提供 reasoning 配置，跳过切换');
+		}
+
+		console.log('  … 运行一次真实代码审查');
+		const reviewUri = Uri.file(path.join(cwd, 'src', 'types.ts'));
+		await commandHandlers.get('deepseekHarness.reviewFile')(reviewUri);
+		await waitFor(() => posted.some((message) => message.type === 'findings'), 180000, '审查结果推送到侧边栏');
+		const findingsMessage = posted.filter((message) => message.type === 'findings').pop();
+		check(Array.isArray(findingsMessage.findings), `审查结果已推送（findings=${findingsMessage.findings.length}）`);
+		check(!posted.some((message) => message.type === 'error'), '审查过程无错误');
+		const reviewState = lastState();
+		check(
+			reviewState.transcript.some((entry) => entry.kind === 'user' && String(entry.text).includes('审查')),
+			'审查请求出现在会话记录里',
+		);
+	}
 
 	console.log('  … 关闭扩展');
 	for (const subscription of context.subscriptions) {
@@ -423,5 +486,12 @@ main()
 			fs.rmSync(storageDir, { recursive: true, force: true });
 		} catch {
 			/* ignore */
+		}
+		if (strictMode) {
+			try {
+				fs.rmSync(smokeWorkspace, { recursive: true, force: true });
+			} catch {
+				/* ignore */
+			}
 		}
 	});

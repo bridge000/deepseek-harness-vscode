@@ -507,24 +507,85 @@ button:disabled {
 	opacity: 0;
 }
 
-/* ------------------------------------------------------------------ 思考 / 工具 / 通知 */
+/* ------------------------------------------------------------------ 思考链 / 工具 / 通知 */
 
-.thought {
-	padding: 4px 8px;
-	border: 1px dashed var(--dsh-border);
-	border-radius: var(--dsh-radius);
+/* 折叠成一行「已思考 N 秒」；展开后是低饱和小字，左侧 2px 竖线。 */
+.thought-chain {
+	min-width: 0;
 }
 
-.thought-summary {
-	cursor: pointer;
+.thought-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 100%;
+	padding: 1px 2px;
+	border: none;
+	border-radius: 4px;
+	background: none;
 	color: var(--vscode-descriptionForeground);
-	font-size: 0.85em;
+	font-size: 0.82em;
+	line-height: 1.6;
+	text-align: left;
 }
 
-.thought .md {
-	margin-top: 6px;
-	color: var(--vscode-descriptionForeground);
+.thought-row:hover {
+	background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.14));
+}
+
+.thought-chevron {
+	flex: 0 0 auto;
+	width: 0.85em;
+	opacity: 0.7;
+}
+
+.thought-spark {
+	flex: 0 0 auto;
+	opacity: 0.8;
+}
+
+.thought-spark.is-streaming {
+	animation: dsh-breathe 1.6s ease-in-out infinite;
+}
+
+.thought-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.thought-detail {
+	flex: 0 0 auto;
+	opacity: 0.7;
 	font-size: 0.92em;
+}
+
+.thought-body {
+	margin: 2px 0 4px;
+	padding: 0 0 0 8px;
+	border-left: 2px solid var(--dsh-border);
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.86em;
+	line-height: 1.55;
+}
+
+.thought-body .md {
+	opacity: 0.92;
+}
+
+.thought-body .md code {
+	background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+}
+
+@keyframes dsh-breathe {
+	0%,
+	100% {
+		opacity: 0.35;
+	}
+	50% {
+		opacity: 0.95;
+	}
 }
 
 .tool {
@@ -814,6 +875,53 @@ button:disabled {
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 4px;
+}
+
+/* 自动上下文 chip：composer 上方一行「自动上下文：<path>（选区/全文）」+ 开关。 */
+.auto-context-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.78em;
+	line-height: 1.6;
+}
+
+.auto-context-bar.is-disabled {
+	opacity: 0.7;
+}
+
+.auto-context-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.auto-context-note {
+	flex: 0 0 auto;
+	padding: 0 5px;
+	border: 1px solid var(--dsh-border);
+	border-radius: 8px;
+}
+
+.auto-context-toggle {
+	flex: 0 0 auto;
+	margin-left: auto;
+	padding: 0 7px;
+	border: 1px solid var(--vscode-button-border, var(--dsh-border));
+	border-radius: 8px;
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	font-size: 0.95em;
+	line-height: 1.5;
+}
+
+.auto-context-toggle[aria-checked='false'] {
+	background: transparent;
+	opacity: 0.85;
 }
 
 .context-chip {

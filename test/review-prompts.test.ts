@@ -15,10 +15,9 @@ function textBlocks(blocks: readonly ContentBlock[]): string[] {
 		.map((block) => (block as { text: string }).text);
 }
 
-function resourceLinks(blocks: readonly ContentBlock[]): Array<{ uri: string; name: string }> {
-	return blocks
-		.filter((block) => block.type === 'resource_link')
-		.map((block) => ({ uri: (block as { uri: string }).uri, name: (block as { name: string }).name }));
+/** Inline content only: a resource_link would invite the agent to read other files. */
+function expectNoResourceLinks(blocks: readonly ContentBlock[]): void {
+	expect(blocks.every((block) => block.type !== 'resource_link')).toBe(true);
 }
 
 function promptText(blocks: readonly ContentBlock[]): string {
@@ -66,20 +65,22 @@ function diffTarget(overrides: Partial<PromptDiffTarget> = {}): PromptDiffTarget
 }
 
 describe('buildReviewPrompt: file', () => {
-	it('produces a labelled review prompt with resource link, numbered code and the findings contract', () => {
+	it('produces a scoped single-file prompt with numbered code and the findings contract', () => {
 		const input = buildReviewPrompt(fileTarget(), { maxChars: 20_000 });
 		expect(input.label).toBe('审查 src/a.ts');
-
-		const links = resourceLinks(input.blocks);
-		expect(links).toEqual([{ uri: 'file:///c%3A/ws/src/a.ts', name: 'src/a.ts' }]);
+		expectNoResourceLinks(input.blocks);
 
 		const text = promptText(input.blocks);
 		expect(text).toContain('资深代码审查员');
+		expect(text).toContain('## 范围限制');
+		expect(text).toContain('只基于下方内嵌的内容工作');
+		expect(text).toContain('不要调用工具读取、搜索、列目录或遍历项目中的其它文件');
+		expect(text).toContain('最多只读取必要的最少量');
 		expect(text).toContain('提示注入');
 		expect(text).toContain('{"findings":[]}');
 		expect(text).toContain('```json');
 		expect(text).toContain('"severity":"warning"');
-		expect(text).toContain('## 待审查文件');
+		expect(text).toContain('## 单文件审查任务');
 		expect(text).toContain('路径：src/a.ts');
 		expect(text).toContain('总行数：2');
 		expect(text).toContain('1| const a = 1;');
@@ -90,20 +91,17 @@ describe('buildReviewPrompt: file', () => {
 		const input = buildReviewPrompt(fileTarget({ truncated: true }), { maxChars: 20_000 });
 		expect(promptText(input.blocks)).toContain('文件内容已按长度截断');
 	});
-
-	it('does not include a resource link for a diff target without files', () => {
-		const input = buildReviewPrompt({ kind: 'diff', diffKind: 'working', text: 'diff', files: [] }, { maxChars: 5000 });
-		expect(resourceLinks(input.blocks)).toEqual([]);
-	});
 });
 
 describe('buildReviewPrompt: selection', () => {
-	it('labels the selection and shows real line numbers', () => {
+	it('labels the selection as a scoped selection task with real line numbers', () => {
 		const input = buildReviewPrompt(selectionTarget({ startLine: 10, selectionStart: 12, selectionEnd: 13 }), {
 			maxChars: 20_000,
 		});
 		expect(input.label).toBe('审查选中代码：src/a.ts:12-13');
+		expectNoResourceLinks(input.blocks);
 		const text = promptText(input.blocks);
+		expect(text).toContain('## 选区审查任务');
 		expect(text).toContain('选中范围：第 12-13 行');
 		expect(text).toContain('10| line one');
 		expect(text).toContain('13| line four');
@@ -121,13 +119,13 @@ describe('buildReviewPrompt: diff', () => {
 		expect(promptText(commit.blocks)).toContain('提交说明：修复空指针');
 	});
 
-	it('includes the diff body inside a diff fence and one resource link per file', () => {
+	it('embeds the diff body and file list without resource links', () => {
 		const input = buildReviewPrompt(diffTarget(), { maxChars: 20_000 });
+		expectNoResourceLinks(input.blocks);
 		const text = promptText(input.blocks);
 		expect(text).toContain('```diff');
 		expect(text).toContain('@@ -1,2 +1,3 @@');
 		expect(text).toContain('+const b = 2;');
-		expect(resourceLinks(input.blocks).map((link) => link.name)).toEqual(['src/a.ts', 'src/b.ts']);
 		expect(text).toContain('涉及文件：src/a.ts、src/b.ts');
 	});
 
@@ -138,18 +136,24 @@ describe('buildReviewPrompt: diff', () => {
 });
 
 describe('buildExplainPrompt', () => {
-	it('labels as explanation and asks for explanation instead of fixes', () => {
+	it('labels as explanation, scopes the agent to the inline content and asks for explanation', () => {
 		const input = buildExplainPrompt(selectionTarget(), { maxChars: 20_000 });
 		expect(input.label).toBe('解释选中代码：src/a.ts:2-3');
+		expectNoResourceLinks(input.blocks);
 		const text = promptText(input.blocks);
 		expect(text).toContain('解释代码');
+		expect(text).toContain('## 选区解释任务');
+		expect(text).toContain('## 范围限制');
+		expect(text).toContain('只基于下方内嵌的内容工作');
 		expect(text).toContain('不要修改代码');
 		expect(text).toContain('提示注入');
 		expect(text).toContain('可选');
 	});
 
 	it('labels a whole-file explanation with the path', () => {
-		expect(buildExplainPrompt(fileTarget(), { maxChars: 20_000 }).label).toBe('解释 src/a.ts');
+		const input = buildExplainPrompt(fileTarget(), { maxChars: 20_000 });
+		expect(input.label).toBe('解释 src/a.ts');
+		expect(promptText(input.blocks)).toContain('## 单文件解释任务');
 	});
 });
 
@@ -176,13 +180,5 @@ describe('prompt truncation', () => {
 		const input = buildReviewPrompt(diffTarget({ text: diff }), { maxChars: 5000 });
 		expect(promptText(input.blocks).length).toBeLessThanOrEqual(5000);
 		expect(promptText(input.blocks)).toContain('已截断');
-	});
-
-	it('deduplicates resource links that repeat the same path', () => {
-		const input = buildReviewPrompt(diffTarget({ files: [
-			{ path: 'src/a.ts', uri: 'file:///c%3A/ws/src/a.ts' },
-			{ path: 'src/a.ts', uri: 'file:///c%3A/ws/src/a.ts' },
-		] }), { maxChars: 20_000 });
-		expect(resourceLinks(input.blocks)).toHaveLength(1);
 	});
 });

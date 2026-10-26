@@ -8,6 +8,7 @@
  */
 import type {
 	AcpCapabilities,
+	AutoContextInfo,
 	ConfigOption,
 	ConfigOptionValue,
 	ContextRef,
@@ -22,6 +23,8 @@ import type {
 import { findConfigOption } from '../acp/protocol';
 import type { ExtToWeb, WebviewToExt } from '../ui/protocol';
 import { renderMarkdown } from './markdown';
+import { groupThoughtEntries, thoughtHeader } from './thought';
+import type { ThoughtGroup } from './thought';
 
 interface VsCodeApi {
 	postMessage(message: WebviewToExt): void;
@@ -190,6 +193,7 @@ interface UiRefs {
 	permissionMeta: HTMLDivElement;
 	permissionBody: HTMLDivElement;
 	permissionActions: HTMLDivElement;
+	autoContextBar: HTMLDivElement;
 	chips: HTMLDivElement;
 	input: HTMLTextAreaElement;
 	btnPickContext: HTMLButtonElement;
@@ -271,6 +275,9 @@ function buildUi(root: HTMLElement): UiRefs {
 
 	// 输入区
 	const composer = el('div', 'composer');
+	const autoContextBar = el('div', 'auto-context-bar');
+	autoContextBar.hidden = true;
+	autoContextBar.setAttribute('aria-label', '自动上下文');
 	const chips = el('div', 'context-chips');
 	chips.hidden = true;
 	const input = el('textarea', 'composer-input');
@@ -293,7 +300,7 @@ function buildUi(root: HTMLElement): UiRefs {
 	selectors.append(modelWrap, reasoningWrap);
 	const btnSend = button('发送', '发送（Enter）', 'primary-button');
 	composerBar.append(btnPickContext, selectors, btnSend);
-	composer.append(chips, input, composerBar);
+	composer.append(autoContextBar, chips, input, composerBar);
 
 	// 临时提示
 	const toast = el('div', 'toast');
@@ -328,6 +335,7 @@ function buildUi(root: HTMLElement): UiRefs {
 		permissionMeta,
 		permissionBody,
 		permissionActions,
+		autoContextBar,
 		chips,
 		input,
 		btnPickContext,
@@ -355,6 +363,32 @@ const state: ViewState = {
 	draftRefs: [],
 	permissionQueue: [],
 };
+
+// 自动上下文开关是纯 webview 偏好，用 webview 的 state 持久化，重开侧边栏仍然生效。
+interface PersistedViewState {
+	autoContextEnabled?: boolean;
+}
+
+function readPersistedState(): PersistedViewState {
+	try {
+		const raw = vscodeApi.getState();
+		if (!raw || typeof raw !== 'object') return {};
+		const enabled = (raw as { autoContextEnabled?: unknown }).autoContextEnabled;
+		return { autoContextEnabled: typeof enabled === 'boolean' ? enabled : undefined };
+	} catch {
+		return {};
+	}
+}
+
+let autoContextEnabled = readPersistedState().autoContextEnabled !== false;
+
+function persistAutoContextEnabled(): void {
+	try {
+		vscodeApi.setState({ autoContextEnabled });
+	} catch {
+		// 持久化失败不影响界面。
+	}
+}
 
 const entryNodes = new Map<string, HTMLElement>();
 const refs = buildUi(requiredElement('app'));
@@ -425,6 +459,86 @@ function markdownBody(text: string, streaming = false): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
+// 思考链：折叠成一行「已思考 N 秒」，展开是低饱和小字
+// ---------------------------------------------------------------------------
+
+interface ThoughtViewState {
+	/** 首条 thought chunk 的时间戳（由条目 at 给出）。 */
+	startedAt: number;
+	expanded: boolean;
+	/** 流式结束后的实际思考时长；历史恢复的条目没有。 */
+	durationMs?: number;
+	/** 是否已经因为助手正文出现而自动收起过（只自动收一次）。 */
+	autoCollapsed: boolean;
+}
+
+const thoughtStates = new Map<string, ThoughtViewState>();
+let thoughtGroups: ThoughtGroup[] = [];
+let thoughtIndex = new Map<string, ThoughtGroup>();
+
+/** 按当前 transcript 重新分组；非 thought 条目会打断相邻关系。 */
+function rebuildThoughtIndex(): void {
+	thoughtGroups = groupThoughtEntries(state.ui.transcript);
+	thoughtIndex = new Map();
+	for (const group of thoughtGroups) {
+		for (const entry of group.entries) thoughtIndex.set(entry.id, group);
+	}
+}
+
+function thoughtViewState(group: ThoughtGroup): ThoughtViewState {
+	let view = thoughtStates.get(group.id);
+	if (!view) {
+		view = {
+			startedAt: typeof group.at === 'number' && Number.isFinite(group.at) ? group.at : Date.now(),
+			expanded: false,
+			autoCollapsed: false,
+		};
+		thoughtStates.set(group.id, view);
+	}
+	return view;
+}
+
+/** 流式结束时记录「首条 chunk → streaming=false」的时长，按秒取整展示。 */
+function finalizeThoughtGroup(group: ThoughtGroup): void {
+	if (group.streaming) return;
+	const view = thoughtStates.get(group.id);
+	if (!view || view.durationMs !== undefined) return;
+	view.durationMs = Math.max(0, Date.now() - view.startedAt);
+}
+
+/** patch / 追加后按组重渲染（组内除首条外都是隐藏占位节点）。 */
+function refreshThoughtGroup(group: ThoughtGroup): void {
+	for (const member of group.entries) {
+		const node = createEntryNode(member);
+		const existing = entryNodes.get(member.id);
+		if (existing) existing.replaceWith(node);
+		else refs.transcript.append(node);
+		entryNodes.set(member.id, node);
+	}
+}
+
+/** 该消息的第一条助手正文到达后自动收起思考链（用户手动展开过的也收，符合 Claude Code 行为）。 */
+function autoCollapseThoughts(messageId: string | undefined): void {
+	if (!messageId) return;
+	for (const group of thoughtGroups) {
+		if (group.messageId !== messageId || group.streaming) continue;
+		const view = thoughtStates.get(group.id);
+		if (!view || view.autoCollapsed) continue;
+		view.autoCollapsed = true;
+		if (!view.expanded) continue;
+		view.expanded = false;
+		refreshThoughtGroup(group);
+	}
+}
+
+/** 会话切换后清掉不再存在的思考状态，避免 Map 无限增长。 */
+function pruneThoughtStates(): void {
+	for (const id of [...thoughtStates.keys()]) {
+		if (!thoughtIndex.has(id)) thoughtStates.delete(id);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 单条消息渲染
 // ---------------------------------------------------------------------------
 
@@ -454,12 +568,42 @@ function createEntryNode(entry: TranscriptEntry): HTMLElement {
 			break;
 		}
 		case 'thought': {
-			const details = el('details', 'thought');
-			details.append(
-				el('summary', 'thought-summary', entry.streaming === true ? '思考过程（生成中…）' : '思考过程'),
-				markdownBody(entry.text, entry.streaming === true),
-			);
-			node.append(details);
+			const group = thoughtIndex.get(entry.id);
+			if (!group || group.id !== entry.id) {
+				// 同组条目合并到首条渲染，其余只保留一个隐藏占位节点供 patch 定位。
+				node.hidden = true;
+				node.classList.add('thought-ghost');
+				break;
+			}
+			node.classList.add('thought-chain');
+			const view = thoughtViewState(group);
+			const header = thoughtHeader({
+				streaming: group.streaming,
+				durationMs: view.durationMs,
+				hasBody: group.text.trim().length > 0,
+			});
+			const row = el('button', 'thought-row');
+			row.type = 'button';
+			const chevron = el('span', 'thought-chevron', view.expanded ? '▾' : '▸');
+			chevron.setAttribute('aria-hidden', 'true');
+			const spark = el('span', 'thought-spark', group.streaming ? '✻' : '✦');
+			spark.setAttribute('aria-hidden', 'true');
+			if (group.streaming) spark.classList.add('is-streaming');
+			row.append(chevron, spark, el('span', 'thought-label', header.label));
+			if (header.detail) row.append(el('span', 'thought-detail', header.detail));
+			row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
+			row.title = header.detail ? `${header.label}（${header.detail}）` : header.label;
+			const body = el('div', 'thought-body');
+			body.hidden = !view.expanded;
+			if (group.text.length > 0) body.append(markdownBody(group.text, group.streaming));
+			const toggle = (): void => {
+				view.expanded = !view.expanded;
+				row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
+				chevron.textContent = view.expanded ? '▾' : '▸';
+				body.hidden = !view.expanded;
+			};
+			row.addEventListener('click', toggle);
+			node.append(row, body);
 			break;
 		}
 		case 'tool': {
@@ -505,15 +649,31 @@ function createEntryNode(entry: TranscriptEntry): HTMLElement {
 function rebuildTranscript(): void {
 	entryNodes.clear();
 	refs.transcript.replaceChildren();
+	rebuildThoughtIndex();
 	for (const entry of state.ui.transcript) {
 		const node = createEntryNode(entry);
 		entryNodes.set(entry.id, node);
 		refs.transcript.append(node);
 	}
+	pruneThoughtStates();
 }
 
 function upsertEntry(entry: TranscriptEntry): void {
 	const stick = isNearBottom();
+	rebuildThoughtIndex();
+	if (entry.kind === 'thought') {
+		const group = thoughtIndex.get(entry.id);
+		if (group) {
+			finalizeThoughtGroup(group);
+			refreshThoughtGroup(group);
+			if (stick) scrollToBottom();
+			return;
+		}
+	}
+	// 助手正文开始输出后收起同一条消息的思考链。
+	if (entry.kind === 'assistant' && entry.streaming === true && entry.text.trim().length > 0) {
+		autoCollapseThoughts(entry.messageId);
+	}
 	const node = createEntryNode(entry);
 	const existing = entryNodes.get(entry.id);
 	if (existing) existing.replaceWith(node);
@@ -694,6 +854,76 @@ function renderContextChips(): void {
 		updateSendButton();
 	});
 	refs.chips.append(clear);
+}
+
+function normalizeAutoContext(value: unknown): AutoContextInfo | undefined {
+	if (!value || typeof value !== 'object') return undefined;
+	const raw = value as Partial<AutoContextInfo>;
+	if (raw.kind !== 'file' && raw.kind !== 'selection' && raw.kind !== 'none') return undefined;
+	const info: AutoContextInfo = { kind: raw.kind };
+	if (typeof raw.path === 'string') info.path = raw.path;
+	if (typeof raw.uri === 'string') info.uri = raw.uri;
+	if (typeof raw.languageId === 'string') info.languageId = raw.languageId;
+	if (typeof raw.startLine === 'number') info.startLine = raw.startLine;
+	if (typeof raw.endLine === 'number') info.endLine = raw.endLine;
+	if (typeof raw.chars === 'number') info.chars = raw.chars;
+	if (typeof raw.note === 'string') info.note = raw.note;
+	return info;
+}
+
+/** 「自动上下文：<path>（选区 Lx-Ly / 全文）」文案。 */
+function autoContextText(info: AutoContextInfo): string {
+	if (info.kind === 'none') return '自动上下文：无';
+	const path = info.path ?? info.uri ?? '当前文件';
+	if (info.kind === 'selection') {
+		const range =
+			typeof info.startLine === 'number'
+				? `选区 L${info.startLine}${typeof info.endLine === 'number' ? `-${info.endLine}` : ''}`
+				: '选区';
+		return `自动上下文：${path}（${range}）`;
+	}
+	return `自动上下文：${path}（全文）`;
+}
+
+/**
+ * composer 上方的自动上下文 chip：展示扩展当前会附带的文件/选区，并带一个开关。
+ * 关闭后仍保留一行「已关闭」，否则 chip 消失后就没法再打开。
+ */
+function renderAutoContext(): void {
+	const bar = refs.autoContextBar;
+	const info = state.ui.autoContext;
+	bar.replaceChildren();
+	bar.classList.toggle('is-disabled', !autoContextEnabled);
+	const visible = !autoContextEnabled || (info !== undefined && info.kind !== 'none');
+	if (!visible) {
+		bar.hidden = true;
+		return;
+	}
+	bar.hidden = false;
+	const text = autoContextEnabled && info ? autoContextText(info) : '自动上下文：已关闭';
+	const label = el('span', 'auto-context-label', text);
+	if (autoContextEnabled && info) {
+		const hint = [info.uri, typeof info.chars === 'number' ? `${info.chars} 字符` : undefined]
+			.filter((item): item is string => typeof item === 'string' && item.length > 0)
+			.join(' · ');
+		if (hint) label.title = hint;
+	}
+	bar.append(label);
+	if (autoContextEnabled && info?.note) bar.append(el('span', 'auto-context-note', info.note));
+	const toggle = button(
+		autoContextEnabled ? '开' : '关',
+		autoContextEnabled ? '点击关闭自动附带上下文' : '点击开启自动附带上下文',
+		'auto-context-toggle',
+	);
+	toggle.setAttribute('role', 'switch');
+	toggle.setAttribute('aria-checked', autoContextEnabled ? 'true' : 'false');
+	toggle.addEventListener('click', () => {
+		autoContextEnabled = !autoContextEnabled;
+		persistAutoContextEnabled();
+		post({ type: 'setAutoContext', enabled: autoContextEnabled });
+		renderAutoContext();
+	});
+	bar.append(toggle);
 }
 
 function canSend(): boolean {
@@ -907,6 +1137,7 @@ function normalizeUiState(next: UiState): UiState {
 		findings: Array.isArray(next.findings) ? next.findings : [],
 		history: Array.isArray(next.history) ? next.history : [],
 		usage: next.usage,
+		autoContext: normalizeAutoContext(next.autoContext),
 	};
 }
 
@@ -917,6 +1148,7 @@ function renderAll(): void {
 	renderFindings();
 	renderConfigOptions();
 	renderContextChips();
+	renderAutoContext();
 	renderEmptyState();
 	renderPermission();
 	renderHistoryPanel();
@@ -1010,6 +1242,10 @@ function handleMessage(raw: unknown): void {
 			renderContextChips();
 			updateSendButton();
 			refs.input.focus();
+			return;
+		case 'autoContext':
+			state.ui.autoContext = normalizeAutoContext(message.info);
+			renderAutoContext();
 			return;
 		case 'runtime':
 			if (message.runtime && typeof message.runtime === 'object') {

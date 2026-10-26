@@ -226,6 +226,11 @@ class ChatViewProviderImpl implements ChatViewProvider {
 				await controller.setConfig(message.configId, message.value);
 				return;
 			}
+			case 'setAutoContext': {
+				if (typeof message.enabled !== 'boolean') return;
+				controller.setAutoContext(message.enabled);
+				return;
+			}
 			case 'pickContext': {
 				const refs = await controller.pickContext();
 				this.post({ type: 'contextRefs', refs: normalizeRefs(refs) });

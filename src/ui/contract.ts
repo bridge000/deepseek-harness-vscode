@@ -18,6 +18,8 @@ export interface ChatController {
 	refreshHistory(): Promise<SessionInfo[]>;
 	pickContext(): Promise<ContextRef[]>;
 	setConfig(configId: string, value: string): Promise<void>;
+	/** Enable/disable auto context for the following messages. */
+	setAutoContext(enabled: boolean): void;
 	permissionResponse(requestId: string, optionId?: string): void;
 	openFile(path: string, line?: number): void;
 	runCommand(command: CommandId): void;
