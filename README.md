@@ -88,16 +88,27 @@ npm run typecheck
 npm run test       # vitest（纯逻辑，不需要安装 DSH）
 npm run compat     # 真实 DSH 契约检查
 npm run smoke      # 真实 ACP 握手
+npm run smoke:ext  # 扩展宿主冒烟（mock vscode + 真实 DSH：启动运行时、发消息、代码审查、切模型）
 npm run package    # dsh-review.vsix
 ```
+
+> `npm run smoke:ext` 用 mock 的 `vscode` 模块加载真实 `dist/extension.js`，走完整侧边栏协议 + 真实 DSH，不弹 VS Code 窗口，适合每次改动后回归。
+
+## 交互说明 / 已知限制
+
+- 权限批准走 **VS Code 模态弹窗**（不是侧边栏卡片）：即使侧边栏隐藏也能批准；弹窗关闭视为拒绝。
+- 侧边栏「历史」按钮同时支持下拉选择与命令面板的 QuickPick（两种入口都能恢复会话）。
+- 审查发现的 JSON 契约由提示词固定；模型未按契约输出时，聊天里仍有完整 markdown，但不会生成波浪线。
+- `审查工作区改动` 是标准 `git diff`：**不包含未跟踪的新文件**；`查看本轮改动` 的左侧是 `HEAD` 版本（不是「本轮开始前」），因此本轮之前就有的未提交修改也会出现在 diff 中。
+- 非 git 工作区可用文件/选区审查；改动类功能会提示需要 git。
+- `maxReviewChars` 在扩展激活时读取；修改后建议重载窗口。
 
 目录：
 
 ```
 src/acp/       协议类型、JSON-RPC、stdio transport、运行时、兼容探测
 src/session/   会话管理、transcript 持久化
-src/review/    提示词、findings 解析、git、诊断、改动 diff
-src/context/   上下文收集（当前文件/选区/@file）
+src/review/    提示词、findings 解析、git、诊断、改动 diff、上下文收集
 src/ui/        侧边栏 provider、权限弹窗、状态栏、诊断报告
 src/webview/   侧边栏前端（原生 TS + marked + DOMPurify）
 ```

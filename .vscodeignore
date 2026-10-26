@@ -5,7 +5,9 @@ test/**
 scripts/**
 src/**
 tsconfig.json
+package-lock.json
 .gitignore
+dist/compat.cjs
 *.ts
 *.map
 **/*.d.ts

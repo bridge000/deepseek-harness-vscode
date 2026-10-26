@@ -303,7 +303,8 @@
     "test": "vitest run",
     "compat": "node scripts/compat.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "package": "node scripts/build.mjs --production && vsce package --no-dependencies --out dsh-review.vsix"
+    "smoke:ext": "node scripts/extension-smoke.mjs",
+    "package": "node scripts/build.mjs --production && vsce package --no-dependencies --allow-missing-repository --out dsh-review.vsix"
   },
   "dependencies": {
     "dompurify": "^3.4.17",

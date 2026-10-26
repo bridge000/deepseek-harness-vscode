@@ -286,6 +286,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 				profile,
 				cwd: config.workspaceRoot,
 				log: (line) => this.logger.raw(`[probe] ${line}`),
+				timeoutMs: 45000,
 			});
 			if (!probe.ok && config.compatAutoRepair) {
 				const action = await vscode.window.showWarningMessage(
@@ -304,6 +305,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 						profile,
 						cwd: config.workspaceRoot,
 						log: (line) => this.logger.raw(`[probe-retry] ${line}`),
+						timeoutMs: 45000,
 					});
 				}
 			}
@@ -318,6 +320,9 @@ class DshReviewController implements ChatController, vscode.Disposable {
 				log: (line) => this.logger.raw(`[runtime] ${line}`),
 				onDirtyStdout: (line) => this.logger.raw(`[stdout] ${line}`),
 			});
+			// Hand the probe facts to the runtime before start() so RuntimeState
+			// carries the DSH version for the sidebar / diagnose report.
+			runtime.setProbe(probe);
 			this.runtime = runtime;
 			this.disposeSubscriptions.push(
 				runtime.onDidChangeState((state) => this.onRuntimeState(state)),
@@ -439,32 +444,24 @@ class DshReviewController implements ChatController, vscode.Disposable {
 		return run;
 	}
 
-	private async runPrompt(label: string, blocks: ContentBlock[], refs?: ContextRef[]): Promise<{ text: string; stopReason: string }> {
+	private async runPrompt(label: string, blocks: ContentBlock[]): Promise<{ text: string; stopReason: string }> {
 		return this.enqueue(async () => {
 			await this.ensureReady();
 			const session = await this.ensureSession();
+			// The session manager emits the user transcript entry itself (including
+			// context refs); we only need a marker to collect this turn's assistant
+			// text once the prompt settles.
 			const marker = this.transcript.length;
-			const userText = blocks
-				.map((block) => (block.type === 'text' ? String((block as { text?: unknown }).text ?? '') : ''))
-				.join('\n')
+			this.logger.info(`发送 prompt：${label}`);
+			const outcome = await this.sessionService!.prompt(session.sessionId, blocks);
+			const text = this.transcript
+				.slice(marker)
+				.filter((entry): entry is Extract<TranscriptEntry, { kind: 'assistant' }> => entry.kind === 'assistant')
+				.map((entry) => entry.text)
+				.join('')
 				.trim();
-			this.upsertEntry({ id: uid(), kind: 'user', text: userText || label, refs, at: Date.now() });
-			this.provider?.post({ type: 'append', entries: [this.transcript[this.transcript.length - 1]] });
-			this.setBusy(true);
-			try {
-				this.logger.info(`发送 prompt：${label}`);
-				const outcome = await this.sessionService!.prompt(session.sessionId, blocks);
-				const text = this.transcript
-					.slice(marker)
-					.filter((entry): entry is Extract<TranscriptEntry, { kind: 'assistant' }> => entry.kind === 'assistant')
-					.map((entry) => entry.text)
-					.join('')
-					.trim();
-				return { text, stopReason: outcome.stopReason };
-			} finally {
-				this.setBusy(false);
-				this.scheduleSave();
-			}
+			this.scheduleSave();
+			return { text, stopReason: outcome.stopReason };
 		});
 	}
 
@@ -478,7 +475,13 @@ class DshReviewController implements ChatController, vscode.Disposable {
 			blocks.push({ type: 'resource_link', uri: ref.uri, name: ref.name });
 		}
 		try {
-			await this.runPrompt('聊天', blocks, refs);
+			await this.review?.beginChanges().catch(() => undefined);
+			await this.runPrompt('聊天', blocks);
+			const changed = (await this.review?.endChanges()) ?? [];
+			if (changed.length > 0) {
+				this.lastTurnChanges = changed;
+				await this.notifyChanges(changed);
+			}
 		} catch (error) {
 			this.appendNotice('error', `发送失败：${errorMessage(error)}`);
 		}
@@ -564,7 +567,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 
 	openFile(filePath: string, line?: number): void {
 		const root = readConfig().workspaceRoot;
-		const resolved = path.resolve(filePath);
+		const resolved = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(root || process.cwd(), filePath);
 		if (!root || !resolved.toLowerCase().startsWith(path.resolve(root).toLowerCase())) {
 			void vscode.window.showWarningMessage(`拒绝打开工作区之外的文件：${filePath}`);
 			return;
@@ -573,7 +576,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 			.showTextDocument(vscode.Uri.file(resolved), {
 				selection: typeof line === 'number' ? new vscode.Range(Math.max(line - 1, 0), 0, Math.max(line - 1, 0), 0) : undefined,
 			})
-			.catch((error: unknown) => this.appendNotice('error', `打开文件失败：${errorMessage(error)}`));
+			.then(undefined, (error: unknown) => this.appendNotice('error', `打开文件失败：${errorMessage(error)}`));
 	}
 
 	runCommand(command: CommandId): void {
