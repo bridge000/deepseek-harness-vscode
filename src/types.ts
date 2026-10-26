@@ -11,6 +11,23 @@ export interface ContextRef {
 	uri: string;
 }
 
+/** What the auto-context collector picked from the focused editor. */
+export interface AutoContextInfo {
+	kind: 'file' | 'selection' | 'none';
+	/** Workspace-relative POSIX path when available. */
+	path?: string;
+	/** `file:` URI when the document is saved. */
+	uri?: string;
+	languageId?: string;
+	/** Selection start/end lines (1-based, inclusive) for `selection`. */
+	startLine?: number;
+	endLine?: number;
+	/** Attached character count (after truncation). */
+	chars?: number;
+	/** User facing note, e.g. 「未保存文件」「已截断」. */
+	note?: string;
+}
+
 export type Severity = 'error' | 'warning' | 'info';
 
 /** One reviewed problem produced by the agent (parsed from its JSON contract). */
@@ -147,4 +164,6 @@ export interface UiState {
 	findings: Finding[];
 	history: SessionInfo[];
 	usage?: UsageInfo;
+	/** Current auto-context selection shown above the composer. */
+	autoContext?: AutoContextInfo;
 }

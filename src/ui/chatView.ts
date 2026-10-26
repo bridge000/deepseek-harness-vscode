@@ -15,8 +15,8 @@ import type { ChatViewDeps, ChatViewProvider } from './contract';
 import { isCommandId, isWebviewToExt } from './protocol';
 import type { ExtToWeb, WebviewToExt } from './protocol';
 
-/** 与 package.json `contributes.views.dshReview[0].id` 保持一致。 */
-export const CHAT_VIEW_ID = 'dshReview.chat';
+/** 与 package.json `contributes.views.deepseekHarness[0].id` 保持一致。 */
+export const CHAT_VIEW_ID = 'deepseekHarness.chat';
 
 function createNonce(): string {
 	return randomBytes(16).toString('base64');
@@ -69,7 +69,7 @@ function buildHtml(webview: vscode.Webview, webviewRoot: vscode.Uri): string {
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta http-equiv="Content-Security-Policy" content="${csp}" />
 		<link rel="stylesheet" href="${styleUri.toString()}" nonce="${nonce}" />
-		<title>DSH Review</title>
+		<title>DeepSeek Harness</title>
 	</head>
 	<body>
 		<div id="app"></div>
@@ -84,6 +84,8 @@ class ChatViewProviderImpl implements ChatViewProvider {
 
 	private view: vscode.WebviewView | undefined;
 	private readonly deps: ChatViewDeps;
+	/** `onVisible` fires once so the controller can auto-start the runtime. */
+	private notifiedVisible = false;
 
 	constructor(deps: ChatViewDeps) {
 		this.deps = deps;
@@ -118,6 +120,19 @@ class ChatViewProviderImpl implements ChatViewProvider {
 			visibilitySubscription.dispose();
 			if (this.view === webviewView) this.view = undefined;
 		});
+		if (!this.notifiedVisible) {
+			this.notifiedVisible = true;
+			try {
+				this.deps.onVisible?.();
+			} catch (error) {
+				this.log(`[聊天视图] onVisible 回调失败：${describeError(error)}`);
+			}
+		}
+	}
+
+	/** 侧边栏当前是否可见（决定权限请求走卡片还是模态弹窗）。 */
+	isVisible(): boolean {
+		return this.view?.visible ?? false;
 	}
 
 	/** 推送一条协议消息；视图不可见（或尚未创建）时静默丢弃。 */

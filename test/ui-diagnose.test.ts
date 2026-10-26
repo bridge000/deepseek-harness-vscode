@@ -43,7 +43,7 @@ describe('formatDiagnoseReport', () => {
 	it('包含标题、运行时、能力矩阵与当前配置', () => {
 		const report = formatDiagnoseReport(makeInput());
 
-		expect(report).toContain('# DSH Review 兼容性诊断报告');
+		expect(report).toContain('# DeepSeek Harness 兼容性诊断报告');
 		expect(report).toContain('- 扩展版本：0.1.0');
 		expect(report).toContain('- 阶段：已连接（ready）');
 		expect(report).toContain('- 可执行文件：C:\\tools\\dsh.exe');
@@ -131,7 +131,7 @@ describe('formatDiagnoseReport', () => {
 		expect(report).toContain('- 阶段：连接失败（error）');
 		expect(report).toContain('- 错误：找不到 dsh 可执行文件');
 		expect(report).toContain('未运行兼容性探针');
-		expect(report).toContain('（未发现候选，请手动设置 `dshReview.executable`）');
+		expect(report).toContain('（未发现候选，请手动设置 `deepseekHarness.executable`）');
 		expect(report).toContain('（无日志）');
 		expect(report).toContain('## 备注');
 		expect(report).not.toContain('undefined');

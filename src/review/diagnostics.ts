@@ -70,7 +70,7 @@ function toDiagnostic(finding: Finding, document: vscode.TextDocument | undefine
  * the user switches workspace folders; findings are resolved lazily.
  */
 export function createFindingsDiagnostics(workspaceRoot: () => string, log?: ReviewLog): FindingsDiagnostics {
-	const collection = vscode.languages.createDiagnosticCollection('dsh-review');
+	const collection = vscode.languages.createDiagnosticCollection('deepseek-harness');
 	let current: ReviewReport | undefined;
 
 	async function publish(label: string, findings: readonly Finding[]): Promise<ReviewReport> {

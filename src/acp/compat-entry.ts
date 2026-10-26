@@ -60,7 +60,7 @@ async function runOneShot(
 /** `npm run compat`: assert the key ACP contract used by the extension. */
 export async function runCompatCli(): Promise<number> {
 	const cwd = process.cwd();
-	log(`DSH Review 兼容性检查（cwd=${cwd}）`);
+	log(`DeepSeek Harness 兼容性检查（cwd=${cwd}）`);
 	let failures = 0;
 	const check = (ok: boolean, message: string): void => {
 		log(`${ok ? '  ✓' : '  ✗'} ${message}`);
@@ -107,14 +107,14 @@ export async function runCompatCli(): Promise<number> {
 		failures += 1;
 		log(`  ✗ 未捕获错误：${error instanceof Error ? error.message : String(error)}`);
 	}
-	log(failures === 0 ? '结果：兼容' : `结果：不兼容（${failures} 项失败）——请运行 “DSH: 兼容性诊断” 并考虑更新扩展`);
+	log(failures === 0 ? '结果：兼容' : `结果：不兼容（${failures} 项失败）——请运行 “DeepSeek Harness: 兼容性诊断” 并考虑更新扩展`);
 	return failures === 0 ? 0 : 1;
 }
 
 /** `npm run smoke`: initialize → session/new → session/close（+ 可选 prompt）。 */
 export async function runSmokeCli(): Promise<number> {
 	const cwd = process.cwd();
-	log(`DSH Review 冒烟测试（cwd=${cwd}）`);
+	log(`DeepSeek Harness 冒烟测试（cwd=${cwd}）`);
 	const launcher = await resolveExecutable('');
 	log(`可执行文件：${launcher.file}（来源 ${launcher.source}）`);
 	const profile = process.env.DSH_REVIEW_PROFILE || 'acp';

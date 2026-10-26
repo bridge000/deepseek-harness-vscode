@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 export type PermissionMode = 'workspace-write' | 'read-only' | 'danger-full-access';
 export type AutoApproveMode = 'ask' | 'all';
+export type AutoContextMode = 'selection-first' | 'file' | 'off';
 
 export interface ExtensionConfig {
 	executable: string;
@@ -10,6 +11,10 @@ export interface ExtensionConfig {
 	autoApprove: AutoApproveMode;
 	workspaceRootIndex: number;
 	maxReviewChars: number;
+	autoContext: AutoContextMode;
+	autoContextMaxChars: number;
+	preferredModel: string;
+	hideLegacyModels: boolean;
 	saveTranscriptLimit: number;
 	showChangesNotice: boolean;
 	checkCompatOnVersionChange: boolean;
@@ -29,12 +34,12 @@ function clampIndex(value: number, length: number): number {
 export function workspaceRootUri(): vscode.Uri | undefined {
 	const folders = vscode.workspace.workspaceFolders;
 	if (!folders || folders.length === 0) return undefined;
-	const raw = vscode.workspace.getConfiguration('dshReview').get<number>('workspaceRootIndex', 0);
+	const raw = vscode.workspace.getConfiguration('deepseekHarness').get<number>('workspaceRootIndex', 0);
 	return folders[clampIndex(raw, folders.length)].uri;
 }
 
 export function readConfig(): ExtensionConfig {
-	const config = vscode.workspace.getConfiguration('dshReview');
+	const config = vscode.workspace.getConfiguration('deepseekHarness');
 	const folders = vscode.workspace.workspaceFolders ?? [];
 	const root = workspaceRootUri();
 	const executable = (config.get<string>('executable', '') ?? '').trim();
@@ -44,6 +49,12 @@ export function readConfig(): ExtensionConfig {
 		? (rawPermission as PermissionMode)
 		: 'workspace-write';
 	const autoApprove: AutoApproveMode = config.get<string>('autoApprove', 'ask') === 'all' ? 'all' : 'ask';
+	const rawAutoContext = config.get<string>('autoContext', 'selection-first');
+	const autoContext: AutoContextMode =
+		rawAutoContext === 'file' || rawAutoContext === 'off' ? rawAutoContext : 'selection-first';
+	const autoContextMaxChars = Math.max(2000, Math.floor(config.get<number>('autoContextMaxChars', 40000)));
+	const preferredModel = (config.get<string>('preferredModel', '') ?? '').trim();
+	const hideLegacyModels = config.get<boolean>('hideLegacyModels', true);
 	const maxReviewChars = Math.max(2000, Math.floor(config.get<number>('maxReviewChars', 60000)));
 	const saveTranscriptLimit = Math.max(1, Math.floor(config.get<number>('saveTranscriptLimit', 50)));
 	return {
@@ -53,6 +64,10 @@ export function readConfig(): ExtensionConfig {
 		autoApprove,
 		workspaceRootIndex: clampIndex(config.get<number>('workspaceRootIndex', 0), Math.max(folders.length, 1)),
 		maxReviewChars,
+		autoContext,
+		autoContextMaxChars,
+		preferredModel,
+		hideLegacyModels,
 		saveTranscriptLimit,
 		showChangesNotice: config.get<boolean>('showChangesNotice', true),
 		checkCompatOnVersionChange: config.get<boolean>('checkCompatOnVersionChange', true),

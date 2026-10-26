@@ -7,7 +7,7 @@ export class Logger {
 	private readonly channel: vscode.OutputChannel;
 	private readonly lines: string[] = [];
 
-	constructor(name = 'DSH Review') {
+	constructor(name = 'DeepSeek Harness') {
 		this.channel = vscode.window.createOutputChannel(name);
 	}
 

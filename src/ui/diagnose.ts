@@ -51,7 +51,7 @@ export function formatDiagnoseReport(input: DiagnoseInput): string {
 	const generatedAt = new Date().toISOString();
 	const lines: string[] = [];
 
-	lines.push('# DSH Review 兼容性诊断报告', '');
+	lines.push('# DeepSeek Harness 兼容性诊断报告', '');
 	lines.push(`- 生成时间：${generatedAt}`);
 	lines.push(`- 扩展版本：${orPlaceholder(input.extensionVersion, '未知')}`);
 	lines.push('');
@@ -94,7 +94,7 @@ export function formatDiagnoseReport(input: DiagnoseInput): string {
 
 	lines.push('## 可执行文件候选', '');
 	if (input.executableCandidates.length === 0) {
-		lines.push('（未发现候选，请手动设置 `dshReview.executable`）');
+		lines.push('（未发现候选，请手动设置 `deepseekHarness.executable`）');
 	} else {
 		input.executableCandidates.forEach((candidate, index) => {
 			lines.push(`${index + 1}. \`${candidate.replace(/`/g, '\\`')}\``);
@@ -140,12 +140,12 @@ export async function showDiagnoseReport(input: DiagnoseInput): Promise<void> {
 		: input.probe && !input.probe.ok
 			? '，兼容性探针未通过'
 			: '';
-	const summary = `DSH Review 诊断：运行时${phase}${detail}`;
+	const summary = `DeepSeek Harness 诊断：运行时${phase}${detail}`;
 	const choice = await vscode.window.showInformationMessage(summary, '复制报告', '打开设置');
 	if (choice === '复制报告') {
 		await vscode.env.clipboard.writeText(report);
 		await vscode.window.showInformationMessage('兼容性诊断报告已复制到剪贴板。');
 	} else if (choice === '打开设置') {
-		await vscode.commands.executeCommand('workbench.action.openSettings', 'dshReview');
+		await vscode.commands.executeCommand('workbench.action.openSettings', 'deepseekHarness');
 	}
 }

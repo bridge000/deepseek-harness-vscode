@@ -35,12 +35,16 @@ export interface ChatViewProvider extends vscode.WebviewViewProvider {
 	postState(): void;
 	postFindings(findings: Finding[]): void;
 	reveal(): Promise<void>;
+	/** Whether the sidebar is currently visible (drives permission cards vs modal). */
+	isVisible(): boolean;
 }
 
 export interface ChatViewDeps {
 	extensionUri: vscode.Uri;
 	controller: ChatController;
 	log: (line: string) => void;
+	/** Called once when the webview is resolved, so the controller can auto-start. */
+	onVisible?: () => void;
 }
 
 /** Everything the compatibility diagnose report shows/copies. */

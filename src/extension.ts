@@ -30,9 +30,9 @@ import { formatDiagnoseReport, showDiagnoseReport } from './ui/diagnose';
 import type { CommandId } from './ui/protocol';
 import { createStatusBar, type StatusBarController } from './ui/statusBar';
 
-const VIEW_ID = 'dshReview.chat';
-const VERSION_KEY = 'dshReview.lastGoodDshVersion';
-const ACTIVE_SESSION_KEY = 'dshReview.activeSessionId';
+const VIEW_ID = 'deepseekHarness.chat';
+const VERSION_KEY = 'deepseekHarness.lastGoodDshVersion';
+const ACTIVE_SESSION_KEY = 'deepseekHarness.activeSessionId';
 
 const EMPTY_CAPABILITIES: RuntimeState['capabilities'] = {
 	sessionList: false,
@@ -69,11 +69,11 @@ function fixPrompt(findingText: string): string {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-	const logger = new Logger('DSH Review');
+	const logger = new Logger('DeepSeek Harness');
 	const controller = new DshReviewController(context, logger);
 	context.subscriptions.push({ dispose: () => logger.dispose() }, controller);
 	await controller.init();
-	logger.info('DSH Review 已激活（ACP 客户端）');
+	logger.info('DeepSeek Harness 已激活（ACP 客户端）');
 }
 
 export async function deactivate(): Promise<void> {
@@ -141,7 +141,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 			}),
 		);
 		this.statusBar = createStatusBar(() => {
-			void vscode.commands.executeCommand('dshReview.openChat');
+			void vscode.commands.executeCommand('deepseekHarness.openChat');
 		});
 		this.context.subscriptions.push(this.statusBar);
 		this.registerCommands();
@@ -153,21 +153,21 @@ class DshReviewController implements ChatController, vscode.Disposable {
 		const register = (id: string, handler: (...args: unknown[]) => unknown): void => {
 			this.disposeSubscriptions.push(vscode.commands.registerCommand(id, handler));
 		};
-		register('dshReview.openChat', () => this.openChat());
-		register('dshReview.reviewFile', (uri?: unknown) => this.reviewFile(uri instanceof vscode.Uri ? uri : undefined));
-		register('dshReview.reviewSelection', () => this.reviewSelection('review'));
-		register('dshReview.explainSelection', () => this.reviewSelection('explain'));
-		register('dshReview.reviewChanges', () => this.reviewDiff('working'));
-		register('dshReview.reviewStaged', () => this.reviewDiff('staged'));
-		register('dshReview.reviewCommit', () => this.reviewDiff('commit'));
-		register('dshReview.fixFindings', () => this.fixFindings());
-		register('dshReview.showTurnChanges', () => this.showTurnChanges());
-		register('dshReview.clearFindings', () => this.clearFindings());
-		register('dshReview.newSession', () => this.newSession());
-		register('dshReview.history', () => this.showHistory());
-		register('dshReview.restartRuntime', () => this.restartRuntime());
-		register('dshReview.diagnose', () => this.diagnose());
-		register('dshReview.configure', () => this.openSettings());
+		register('deepseekHarness.openChat', () => this.openChat());
+		register('deepseekHarness.reviewFile', (uri?: unknown) => this.reviewFile(uri instanceof vscode.Uri ? uri : undefined));
+		register('deepseekHarness.reviewSelection', () => this.reviewSelection('review'));
+		register('deepseekHarness.explainSelection', () => this.reviewSelection('explain'));
+		register('deepseekHarness.reviewChanges', () => this.reviewDiff('working'));
+		register('deepseekHarness.reviewStaged', () => this.reviewDiff('staged'));
+		register('deepseekHarness.reviewCommit', () => this.reviewDiff('commit'));
+		register('deepseekHarness.fixFindings', () => this.fixFindings());
+		register('deepseekHarness.showTurnChanges', () => this.showTurnChanges());
+		register('deepseekHarness.clearFindings', () => this.clearFindings());
+		register('deepseekHarness.newSession', () => this.newSession());
+		register('deepseekHarness.history', () => this.showHistory());
+		register('deepseekHarness.restartRuntime', () => this.restartRuntime());
+		register('deepseekHarness.diagnose', () => this.diagnose());
+		register('deepseekHarness.configure', () => this.openSettings());
 	}
 
 	// ---------------------------------------------------------------- state ---
@@ -310,7 +310,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 				}
 			}
 			this.probe = probe;
-			if (!probe.ok) throw new Error(probe.error ?? 'DSH 兼容性自检失败，详见“DSH: 兼容性诊断”');
+			if (!probe.ok) throw new Error(probe.error ?? 'DSH 兼容性自检失败，详见“DeepSeek Harness: 兼容性诊断”');
 
 			const runtime = createDshRuntime({
 				executable: config.executable,
@@ -364,7 +364,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 		this.postState();
 		if (state.phase === 'error' && state.error && this.lastRuntimeErrorShown !== state.error) {
 			this.lastRuntimeErrorShown = state.error;
-			this.appendNotice('error', `DSH 运行时错误：${state.error}（可执行 “DSH: 重启运行时”）`);
+			this.appendNotice('error', `DSH 运行时错误：${state.error}（可执行 “DeepSeek Harness: 重启运行时”）`);
 		}
 	}
 
@@ -580,7 +580,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 	}
 
 	runCommand(command: CommandId): void {
-		void vscode.commands.executeCommand(`dshReview.${command}`);
+		void vscode.commands.executeCommand(`deepseekHarness.${command}`);
 	}
 
 	clearFindings(): void {
@@ -611,7 +611,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 	}
 
 	openSettings(): void {
-		void vscode.commands.executeCommand('workbench.action.openSettings', 'dshReview');
+		void vscode.commands.executeCommand('workbench.action.openSettings', 'deepseekHarness');
 	}
 
 	async copyDiagnostics(): Promise<void> {
@@ -624,7 +624,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 
 	async openChat(): Promise<void> {
 		try {
-			await vscode.commands.executeCommand('workbench.view.extension.dshReview');
+			await vscode.commands.executeCommand('workbench.view.extension.deepseekHarness');
 		} catch {
 			/* container id differs on older VS Code; the reveal below still works */
 		}
@@ -658,7 +658,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 
 	private async runReview(input: ReviewInput, explainOnly = false): Promise<void> {
 		if (!this.review) return;
-		await vscode.commands.executeCommand('dshReview.openChat');
+		await vscode.commands.executeCommand('deepseekHarness.openChat');
 		try {
 			await this.review.beginChanges();
 		} catch (error) {
@@ -704,7 +704,7 @@ class DshReviewController implements ChatController, vscode.Disposable {
 			void vscode.window.showInformationMessage('还没有审查发现；请先运行一次代码审查。');
 			return;
 		}
-		await vscode.commands.executeCommand('dshReview.openChat');
+		await vscode.commands.executeCommand('deepseekHarness.openChat');
 		const prompt = fixPrompt(JSON.stringify(report.findings, null, 2));
 		try {
 			await this.review?.beginChanges();

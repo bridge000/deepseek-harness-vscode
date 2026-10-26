@@ -9,8 +9,8 @@ export interface StatusBarController {
 /** Bottom-left indicator: runtime phase + busy spinner, click opens the sidebar. */
 export function createStatusBar(open: () => void): StatusBarController {
 	const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
-	item.command = 'dshReview.openChat';
-	item.tooltip = 'DSH Review：点击打开侧边栏';
+	item.command = 'deepseekHarness.openChat';
+	item.tooltip = 'DeepSeek Harness：点击打开侧边栏';
 	item.show();
 
 	const update = (runtime: RuntimeState, busy: boolean): void => {

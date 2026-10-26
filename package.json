@@ -1,8 +1,8 @@
 {
-  "name": "dsh-review",
-  "displayName": "DSH Review",
-  "description": "把 DeepSeek Harness（DSH）接进 VS Code 侧边栏：聊天 + 代码审查（ACP 自动化接口）",
-  "version": "0.1.0",
+  "name": "deepseek-harness",
+  "displayName": "DeepSeek Harness",
+  "description": "把 DeepSeek Harness 接入 VS Code 侧边栏：聊天 + 文件级代码审查（非官方社区扩展，ACP 自动化接口）",
+  "version": "0.2.0",
   "publisher": "xliang",
   "license": "MIT",
   "private": true,
@@ -26,7 +26,7 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onView:dshReview.chat"
+    "onView:deepseekHarness.chat"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -38,211 +38,211 @@
     "viewsContainers": {
       "secondarySidebar": [
         {
-          "id": "dshReview",
-          "title": "DSH Review",
+          "id": "deepseekHarness",
+          "title": "DeepSeek Harness",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "dshReview": [
+      "deepseekHarness": [
         {
-          "id": "dshReview.chat",
-          "name": "Chat",
+          "id": "deepseekHarness.chat",
+          "name": "对话",
           "type": "webview"
         }
       ]
     },
     "commands": [
       {
-        "command": "dshReview.openChat",
-        "title": "DSH: 打开侧边栏",
-        "category": "DSH"
+        "command": "deepseekHarness.openChat",
+        "title": "DeepSeek Harness: 打开侧边栏",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.reviewFile",
-        "title": "DSH: 审查当前文件",
-        "category": "DSH",
+        "command": "deepseekHarness.reviewFile",
+        "title": "DeepSeek Harness: 审查当前文件",
+        "category": "DeepSeek Harness",
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "dshReview.reviewSelection",
-        "title": "DSH: 审查选中代码",
-        "category": "DSH"
+        "command": "deepseekHarness.reviewSelection",
+        "title": "DeepSeek Harness: 审查选中代码",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.reviewChanges",
-        "title": "DSH: 审查工作区改动",
-        "category": "DSH"
+        "command": "deepseekHarness.reviewChanges",
+        "title": "DeepSeek Harness: 审查工作区改动",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.reviewStaged",
-        "title": "DSH: 审查暂存区改动",
-        "category": "DSH"
+        "command": "deepseekHarness.reviewStaged",
+        "title": "DeepSeek Harness: 审查暂存区改动",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.reviewCommit",
-        "title": "DSH: 审查某个提交",
-        "category": "DSH"
+        "command": "deepseekHarness.reviewCommit",
+        "title": "DeepSeek Harness: 审查某个提交",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.explainSelection",
-        "title": "DSH: 解释选中代码",
-        "category": "DSH"
+        "command": "deepseekHarness.explainSelection",
+        "title": "DeepSeek Harness: 解释选中代码",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.fixFindings",
-        "title": "DSH: 修复最近审查发现的问题",
-        "category": "DSH"
+        "command": "deepseekHarness.fixFindings",
+        "title": "DeepSeek Harness: 修复最近审查发现的问题",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.showTurnChanges",
-        "title": "DSH: 查看本轮改动",
-        "category": "DSH"
+        "command": "deepseekHarness.showTurnChanges",
+        "title": "DeepSeek Harness: 查看本轮改动",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.clearFindings",
-        "title": "DSH: 清除审查结果",
-        "category": "DSH"
+        "command": "deepseekHarness.clearFindings",
+        "title": "DeepSeek Harness: 清除审查结果",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.newSession",
-        "title": "DSH: 新建会话",
-        "category": "DSH",
+        "command": "deepseekHarness.newSession",
+        "title": "DeepSeek Harness: 新建会话",
+        "category": "DeepSeek Harness",
         "icon": "$(add)"
       },
       {
-        "command": "dshReview.history",
-        "title": "DSH: 会话历史",
-        "category": "DSH",
+        "command": "deepseekHarness.history",
+        "title": "DeepSeek Harness: 会话历史",
+        "category": "DeepSeek Harness",
         "icon": "$(history)"
       },
       {
-        "command": "dshReview.restartRuntime",
-        "title": "DSH: 重启运行时",
-        "category": "DSH",
+        "command": "deepseekHarness.restartRuntime",
+        "title": "DeepSeek Harness: 重启运行时",
+        "category": "DeepSeek Harness",
         "icon": "$(debug-restart)"
       },
       {
-        "command": "dshReview.diagnose",
-        "title": "DSH: 兼容性诊断",
-        "category": "DSH"
+        "command": "deepseekHarness.diagnose",
+        "title": "DeepSeek Harness: 兼容性诊断",
+        "category": "DeepSeek Harness"
       },
       {
-        "command": "dshReview.configure",
-        "title": "DSH: 打开设置",
-        "category": "DSH"
+        "command": "deepseekHarness.configure",
+        "title": "DeepSeek Harness: 打开设置",
+        "category": "DeepSeek Harness"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "dshReview.reviewFile",
+          "command": "deepseekHarness.reviewFile",
           "when": "resourceScheme == file",
           "group": "navigation@100"
         }
       ],
       "editor/context": [
         {
-          "command": "dshReview.reviewFile",
+          "command": "deepseekHarness.reviewFile",
           "when": "resourceScheme == file",
           "group": "dsh@1"
         },
         {
-          "command": "dshReview.reviewSelection",
+          "command": "deepseekHarness.reviewSelection",
           "when": "editorHasSelection && resourceScheme == file",
           "group": "dsh@2"
         },
         {
-          "command": "dshReview.explainSelection",
+          "command": "deepseekHarness.explainSelection",
           "when": "editorHasSelection && resourceScheme == file",
           "group": "dsh@3"
         }
       ],
       "view/title": [
         {
-          "command": "dshReview.newSession",
-          "when": "view == dshReview.chat",
+          "command": "deepseekHarness.newSession",
+          "when": "view == deepseekHarness.chat",
           "group": "navigation@1"
         },
         {
-          "command": "dshReview.history",
-          "when": "view == dshReview.chat",
+          "command": "deepseekHarness.history",
+          "when": "view == deepseekHarness.chat",
           "group": "navigation@2"
         },
         {
-          "command": "dshReview.restartRuntime",
-          "when": "view == dshReview.chat",
+          "command": "deepseekHarness.restartRuntime",
+          "when": "view == deepseekHarness.chat",
           "group": "navigation@3"
         },
         {
-          "command": "dshReview.clearFindings",
-          "when": "view == dshReview.chat",
+          "command": "deepseekHarness.clearFindings",
+          "when": "view == deepseekHarness.chat",
           "group": "navigation@4"
         }
       ],
       "commandPalette": [
         {
-          "command": "dshReview.openChat"
+          "command": "deepseekHarness.openChat"
         },
         {
-          "command": "dshReview.reviewFile"
+          "command": "deepseekHarness.reviewFile"
         },
         {
-          "command": "dshReview.reviewSelection"
+          "command": "deepseekHarness.reviewSelection"
         },
         {
-          "command": "dshReview.reviewChanges"
+          "command": "deepseekHarness.reviewChanges"
         },
         {
-          "command": "dshReview.reviewStaged"
+          "command": "deepseekHarness.reviewStaged"
         },
         {
-          "command": "dshReview.reviewCommit"
+          "command": "deepseekHarness.reviewCommit"
         },
         {
-          "command": "dshReview.explainSelection"
+          "command": "deepseekHarness.explainSelection"
         },
         {
-          "command": "dshReview.fixFindings"
+          "command": "deepseekHarness.fixFindings"
         },
         {
-          "command": "dshReview.showTurnChanges"
+          "command": "deepseekHarness.showTurnChanges"
         },
         {
-          "command": "dshReview.clearFindings"
+          "command": "deepseekHarness.clearFindings"
         },
         {
-          "command": "dshReview.newSession"
+          "command": "deepseekHarness.newSession"
         },
         {
-          "command": "dshReview.history"
+          "command": "deepseekHarness.history"
         },
         {
-          "command": "dshReview.restartRuntime"
+          "command": "deepseekHarness.restartRuntime"
         },
         {
-          "command": "dshReview.diagnose"
+          "command": "deepseekHarness.diagnose"
         },
         {
-          "command": "dshReview.configure"
+          "command": "deepseekHarness.configure"
         }
       ]
     },
     "configuration": {
-      "title": "DSH Review",
+      "title": "DeepSeek Harness",
       "properties": {
-        "dshReview.executable": {
+        "deepseekHarness.executable": {
           "type": "string",
           "default": "",
           "markdownDescription": "`dsh` 可执行文件路径。留空自动探测（PATH / DSH 桌面端 / npx）。"
         },
-        "dshReview.profile": {
+        "deepseekHarness.profile": {
           "type": "string",
           "default": "acp",
           "markdownDescription": "启动的 DSH profile。留空则自动发现支持 ACP 的 profile（默认 `acp`）。"
         },
-        "dshReview.permissionMode": {
+        "deepseekHarness.permissionMode": {
           "type": "string",
           "enum": [
             "workspace-write",
@@ -252,7 +252,7 @@
           "default": "workspace-write",
           "markdownDescription": "写入 `DSH_PERMISSION_MODE`。`read-only` 为严格模式：DSH 每次写文件/执行命令都会请求批准。修改后需重启运行时。"
         },
-        "dshReview.autoApprove": {
+        "deepseekHarness.autoApprove": {
           "type": "string",
           "enum": [
             "ask",
@@ -261,35 +261,61 @@
           "default": "ask",
           "markdownDescription": "`ask` 逐次弹窗批准；`all` 自动允许所有权限请求（危险）。"
         },
-        "dshReview.workspaceRootIndex": {
+        "deepseekHarness.workspaceRootIndex": {
           "type": "number",
           "default": 0,
           "minimum": 0,
           "description": "多根工作区时作为会话 cwd 的根目录下标（越界回退到第一个）。"
         },
-        "dshReview.maxReviewChars": {
+        "deepseekHarness.maxReviewChars": {
           "type": "number",
           "default": 60000,
           "minimum": 2000,
           "description": "一次审查任务发送给 DSH 的最大字符数（超出按文件/行边界截断）。"
         },
-        "dshReview.saveTranscriptLimit": {
+        "deepseekHarness.autoContext": {
+          "type": "string",
+          "enum": [
+            "selection-first",
+            "file",
+            "off"
+          ],
+          "default": "selection-first",
+          "markdownDescription": "自动附带当前焦点编辑器的内容：`selection-first` 有选区带选区、否则带整个文件；`file` 只带整个文件；`off` 关闭自动上下文。"
+        },
+        "deepseekHarness.autoContextMaxChars": {
+          "type": "number",
+          "default": 40000,
+          "minimum": 2000,
+          "description": "自动上下文的最大字符数（超出按行截断）。"
+        },
+        "deepseekHarness.preferredModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "首选模型，格式 `provider/model`（例如 `deepseek-official/deepseek-flash`）。留空则读取 DSH 用户设置里的 `agent-default-model`，再退回上次选择。"
+        },
+        "deepseekHarness.hideLegacyModels": {
+          "type": "boolean",
+          "default": true,
+          "description": "隐藏已下线的旧模型名（如 deepseek-v4-flash，实际由 DeepSeek-V4.1-Flash 提供）。"
+        },
+        "deepseekHarness.saveTranscriptLimit": {
           "type": "number",
           "default": 50,
           "minimum": 1,
           "description": "本地保留的会话记录数量。"
         },
-        "dshReview.showChangesNotice": {
+        "deepseekHarness.showChangesNotice": {
           "type": "boolean",
           "default": true,
           "description": "DSH 一轮结束后，若检测到工作区改动则提示（可查看原生 diff）。"
         },
-        "dshReview.checkCompatOnVersionChange": {
+        "deepseekHarness.checkCompatOnVersionChange": {
           "type": "boolean",
           "default": true,
           "description": "检测到 DSH 版本变化时，后台运行兼容性自检并提示结果。"
         },
-        "dshReview.compat.autoRepair": {
+        "deepseekHarness.compat.autoRepair": {
           "type": "boolean",
           "default": true,
           "description": "ACP profile 启动失败时，允许提示用官方模板重建（会先备份原 profile）。"
@@ -304,7 +330,7 @@
     "compat": "node scripts/compat.mjs",
     "smoke": "node scripts/smoke.mjs",
     "smoke:ext": "node scripts/extension-smoke.mjs",
-    "package": "node scripts/build.mjs --production && vsce package --no-dependencies --allow-missing-repository --out dsh-review.vsix"
+    "package": "node scripts/build.mjs --production && vsce package --no-dependencies --allow-missing-repository --out deepseek-harness.vsix"
   },
   "dependencies": {
     "dompurify": "^3.4.17",

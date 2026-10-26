@@ -1,5 +1,5 @@
 /**
- * DSH Review 侧边栏聊天前端（原生 TypeScript + DOM，无框架）。
+ * DeepSeek Harness 侧边栏聊天前端（原生 TypeScript + DOM，无框架）。
  *
  * 只依赖 DOM 与纯模块（`../acp/protocol` 的 `findConfigOption`、`./markdown`），
  * 不 import vscode。与扩展的通信全部走 `acquireVsCodeApi().postMessage`，
@@ -73,7 +73,7 @@ function actionButton(
 
 function requiredElement(id: string): HTMLElement {
 	const node = document.getElementById(id);
-	if (!node) throw new Error(`[DSH Review] 缺少界面节点 #${id}`);
+	if (!node) throw new Error(`[DeepSeek Harness] 缺少界面节点 #${id}`);
 	return node;
 }
 
@@ -217,7 +217,7 @@ function buildUi(root: HTMLElement): UiRefs {
 	const btnNew = button('新建', '新建会话');
 	const btnHistory = button('历史', '会话历史');
 	const btnRestart = button('重启', '重启 DSH 运行时');
-	const btnSettings = button('设置', '打开 DSH Review 设置');
+	const btnSettings = button('设置', '打开 DeepSeek Harness 设置');
 	actions.append(btnNew, btnHistory, btnRestart, btnSettings);
 	topbar.append(statusRow, statusMeta, actions);
 
@@ -556,7 +556,7 @@ function renderEmptyState(): void {
 			body.textContent = runtime.error || '请检查可执行文件路径与权限模式设置。';
 			actions.append(
 				actionButton('重启运行时', '重新启动 DSH 运行时', () => post({ type: 'restartRuntime' })),
-				actionButton('打开设置', '打开 DSH Review 设置', () => post({ type: 'openSettings' })),
+				actionButton('打开设置', '打开 DeepSeek Harness 设置', () => post({ type: 'openSettings' })),
 				actionButton('运行诊断', '生成兼容性诊断报告', () =>
 					post({ type: 'runCommand', command: 'diagnose' }),
 				),
@@ -568,7 +568,7 @@ function renderEmptyState(): void {
 			body.textContent = '点击下方按钮启动 DSH（ACP 子进程），或先检查设置。';
 			actions.append(
 				actionButton('启动运行时', '启动 DSH 运行时', () => post({ type: 'restartRuntime' })),
-				actionButton('打开设置', '打开 DSH Review 设置', () => post({ type: 'openSettings' })),
+				actionButton('打开设置', '打开 DeepSeek Harness 设置', () => post({ type: 'openSettings' })),
 				actionButton('运行诊断', '生成兼容性诊断报告', () =>
 					post({ type: 'runCommand', command: 'diagnose' }),
 				),

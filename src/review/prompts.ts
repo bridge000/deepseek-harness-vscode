@@ -56,7 +56,7 @@ export interface PromptDiffTarget {
 export type PromptTarget = PromptFileTarget | PromptSelectionTarget | PromptDiffTarget;
 
 export interface BuildPromptOptions {
-	/** Upper bound for the generated prompt text (config `dshReview.maxReviewChars`). */
+	/** Upper bound for the generated prompt text (config `deepseekHarness.maxReviewChars`). */
 	maxChars: number;
 }
 

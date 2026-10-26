@@ -289,7 +289,7 @@ function formatCapabilities(capabilities: ProbeResult['capabilities']): string {
  */
 export async function runCompatCli(): Promise<number> {
 	const log = (line: string): void => console.log(line);
-	console.log('=== DSH Review 兼容性自检 ===');
+	console.log('=== DeepSeek Harness 兼容性自检 ===');
 	const launcher = await resolveExecutable('');
 	log(`可执行文件：${launcher.file}（source=${launcher.source}）`);
 	const profiles = await discoverAcpProfiles(defaultProfilesDir());

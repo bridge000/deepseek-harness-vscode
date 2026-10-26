@@ -1,4 +1,4 @@
-# DSH Review
+# DeepSeek Harness
 
 把 **DeepSeek Harness（DSH）** 接进 VS Code 的侧边栏，用官方 **ACP（Agent Client Protocol）** 驱动，做两件事：
 
@@ -14,37 +14,37 @@
 npm install
 npm run build
 npm run package
-code --install-extension dsh-review.vsix --force
+code --install-extension deepseek-harness.vsix --force
 ```
 
 重载窗口后：
 
-1. VS Code 右侧 **辅助侧边栏（Secondary Side Bar）** 出现 `DSH Review` 图标（或命令面板执行 `DSH: 打开侧边栏`）。
+1. VS Code 右侧 **辅助侧边栏（Secondary Side Bar）** 出现 `DeepSeek Harness` 图标（或命令面板执行 `DeepSeek Harness: 打开侧边栏`）。
 2. 打开一个**受信任的工作区文件夹**。
 3. 第一次发消息会自动拉起 DSH 运行时（需要本机已安装 DSH：桌面端的 `dsh` 或 `npm i -g @deepseek-ai/dsh`）。
 4. 审查代码：编辑器右上角鲸鱼图标、右键菜单，或命令面板执行：
-   - `DSH: 审查当前文件`
-   - `DSH: 审查选中代码` / `DSH: 解释选中代码`
-   - `DSH: 审查工作区改动` / `DSH: 审查暂存区改动` / `DSH: 审查某个提交`
-   - `DSH: 修复最近审查发现的问题`
-   - `DSH: 查看本轮改动` / `DSH: 清除审查结果`
+   - `DeepSeek Harness: 审查当前文件`
+   - `DeepSeek Harness: 审查选中代码` / `DeepSeek Harness: 解释选中代码`
+   - `DeepSeek Harness: 审查工作区改动` / `DeepSeek Harness: 审查暂存区改动` / `DeepSeek Harness: 审查某个提交`
+   - `DeepSeek Harness: 修复最近审查发现的问题`
+   - `DeepSeek Harness: 查看本轮改动` / `DeepSeek Harness: 清除审查结果`
 
 ## 配置
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `dshReview.executable` | `""` | `dsh` 路径；留空自动探测（PATH → DSH 桌面端 → npx） |
-| `dshReview.profile` | `"acp"` | 启动的 profile；留空自动发现 ACP-capable profile |
-| `dshReview.permissionMode` | `"workspace-write"` | 写入 `DSH_PERMISSION_MODE`。`read-only` = 严格模式：每次写文件/执行命令都要批准 |
-| `dshReview.autoApprove` | `"ask"` | `all` 自动批准所有权限请求（危险） |
-| `dshReview.workspaceRootIndex` | `0` | 多根工作区选哪个根 |
-| `dshReview.maxReviewChars` | `60000` | 一次审查发送的最大字符数（超出按文件/行截断） |
-| `dshReview.saveTranscriptLimit` | `50` | 本地保留的会话记录数 |
-| `dshReview.showChangesNotice` | `true` | 一轮结束后提示本轮改动的文件 |
-| `dshReview.checkCompatOnVersionChange` | `true` | DSH 版本变化时后台自检并提示 |
-| `dshReview.compat.autoRepair` | `true` | ACP profile 启动失败时允许用官方模板重建（先备份） |
+| `deepseekHarness.executable` | `""` | `dsh` 路径；留空自动探测（PATH → DSH 桌面端 → npx） |
+| `deepseekHarness.profile` | `"acp"` | 启动的 profile；留空自动发现 ACP-capable profile |
+| `deepseekHarness.permissionMode` | `"workspace-write"` | 写入 `DSH_PERMISSION_MODE`。`read-only` = 严格模式：每次写文件/执行命令都要批准 |
+| `deepseekHarness.autoApprove` | `"ask"` | `all` 自动批准所有权限请求（危险） |
+| `deepseekHarness.workspaceRootIndex` | `0` | 多根工作区选哪个根 |
+| `deepseekHarness.maxReviewChars` | `60000` | 一次审查发送的最大字符数（超出按文件/行截断） |
+| `deepseekHarness.saveTranscriptLimit` | `50` | 本地保留的会话记录数 |
+| `deepseekHarness.showChangesNotice` | `true` | 一轮结束后提示本轮改动的文件 |
+| `deepseekHarness.checkCompatOnVersionChange` | `true` | DSH 版本变化时后台自检并提示 |
+| `deepseekHarness.compat.autoRepair` | `true` | ACP profile 启动失败时允许用官方模板重建（先备份） |
 
-**严格模式**（Claude Code 式"改前批准"）：把 `dshReview.permissionMode` 改成 `read-only` 并重启运行时。DSH 的写文件/命令会被沙箱拦下并弹出批准框，拒绝则文件不变。
+**严格模式**（Claude Code 式"改前批准"）：把 `deepseekHarness.permissionMode` 改成 `read-only` 并重启运行时。DSH 的写文件/命令会被沙箱拦下并弹出批准框，拒绝则文件不变。
 
 ## DSH 更新后怎么办
 
@@ -67,15 +67,15 @@ npm run smoke                     # initialize → session/new → session/close
 $env:DSH_REVIEW_SMOKE_PROMPT="1"; npm run smoke   # 额外发一条消息（消耗 token）
 ```
 
-6. **诊断**：命令面板 `DSH: 兼容性诊断`，生成报告（版本、可执行文件候选、profile、能力位、日志尾部）可复制反馈。
+6. **诊断**：命令面板 `DeepSeek Harness: 兼容性诊断`，生成报告（版本、可执行文件候选、profile、能力位、日志尾部）可复制反馈。
 
 **已知边界**：如果上游把 ACP 升到不兼容的 v2、移除 `dsh-acp-app` 或彻底更换自动化接口，扩展必须发版适配。此时 `npm run compat` 与诊断页会立即报错，而不是静默失效；适配工作集中在 `src/acp/protocol.ts` 与 `src/acp/compat.ts`。
 
 ## 排错
 
-- **找不到 DSH**：设置 `dshReview.executable` 指向 `dsh.cmd`；桌面端默认在
+- **找不到 DSH**：设置 `deepseekHarness.executable` 指向 `dsh.cmd`；桌面端默认在
   `%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd`。
-- **服务起不来 / 一直转圈**：打开命令面板 `DSH: 兼容性诊断`，或看输出面板 `DSH Review`；`DSH: 重启运行时` 可重来一次。
+- **服务起不来 / 一直转圈**：打开命令面板 `DeepSeek Harness: 兼容性诊断`，或看输出面板 `DeepSeek Harness`；`DeepSeek Harness: 重启运行时` 可重来一次。
 - **权限框太频繁**：把 `permissionMode` 改回 `workspace-write`。
 - **审查没有波浪线**：模型回复里没有按约定给出 JSON findings；聊天里仍有完整的 markdown 审查结果。可以重试或换更强的模型。
 - **工作区不是 git 仓库**：审查当前文件/选区仍可用；`审查工作区改动`、`查看本轮改动` 需要 git。
@@ -89,7 +89,7 @@ npm run test       # vitest（纯逻辑，不需要安装 DSH）
 npm run compat     # 真实 DSH 契约检查
 npm run smoke      # 真实 ACP 握手
 npm run smoke:ext  # 扩展宿主冒烟（mock vscode + 真实 DSH：启动运行时、发消息、代码审查、切模型）
-npm run package    # dsh-review.vsix
+npm run package    # deepseek-harness.vsix
 ```
 
 > `npm run smoke:ext` 用 mock 的 `vscode` 模块加载真实 `dist/extension.js`，走完整侧边栏协议 + 真实 DSH，不弹 VS Code 窗口，适合每次改动后回归。

@@ -3,6 +3,7 @@
  * Both sides must only handle the enumerated `type`s; unknown messages are ignored.
  */
 import type {
+	AutoContextInfo,
 	ConfigOption,
 	ContextRef,
 	Finding,
@@ -43,6 +44,7 @@ export type ExtToWeb =
 	| { type: 'history'; history: SessionInfo[] }
 	| { type: 'configOptions'; configOptions: ConfigOption[] }
 	| { type: 'contextRefs'; refs: ContextRef[] }
+	| { type: 'autoContext'; info: AutoContextInfo }
 	| { type: 'runtime'; runtime: RuntimeState }
 	| { type: 'focusInput' };
 
@@ -60,7 +62,8 @@ export type WebviewToExt =
 	| { type: 'clearFindings' }
 	| { type: 'restartRuntime' }
 	| { type: 'openSettings' }
-	| { type: 'copyDiagnostics' };
+	| { type: 'copyDiagnostics' }
+	| { type: 'setAutoContext'; enabled: boolean };
 
 export function isWebviewToExt(value: unknown): value is WebviewToExt {
 	if (typeof value !== 'object' || value === null) return false;
@@ -79,7 +82,8 @@ export function isWebviewToExt(value: unknown): value is WebviewToExt {
 		type === 'clearFindings' ||
 		type === 'restartRuntime' ||
 		type === 'openSettings' ||
-		type === 'copyDiagnostics'
+		type === 'copyDiagnostics' ||
+		type === 'setAutoContext'
 	);
 }
 

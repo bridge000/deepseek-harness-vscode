@@ -18,7 +18,7 @@ const require = createRequire(import.meta.url);
 const Module = require('node:module');
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-review-smoke-'));
+const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deepseek-harness-smoke-'));
 const cwd = projectRoot;
 
 const logs = [];
@@ -208,7 +208,7 @@ function makeVscode() {
 			workspaceFolders: [{ uri: Uri.file(cwd), name: path.basename(cwd), index: 0 }],
 			textDocuments: [],
 			getConfiguration: (section) => ({
-				get: (key, fallback) => (section === 'dshReview' ? fallback : fallback),
+				get: (key, fallback) => (section === 'deepseekHarness' ? fallback : fallback),
 				has: () => false,
 				inspect: () => undefined,
 				update: async () => undefined,
@@ -327,14 +327,14 @@ const check = (ok, message) => {
 };
 
 async function main() {
-	console.log(`DSH Review 扩展宿主冒烟（cwd=${cwd}，storage=${storageDir}）`);
+	console.log(`DeepSeek Harness 扩展宿主冒烟（cwd=${cwd}，storage=${storageDir}）`);
 	await extension.activate(context);
 
 	const ids = [...commandHandlers.keys()];
 	check(ids.length >= 14, `注册了 ${ids.length} 个命令`);
-	check(registeredProviders.has('dshReview.chat'), '注册了侧边栏 webview provider');
+	check(registeredProviders.has('deepseekHarness.chat'), '注册了侧边栏 webview provider');
 
-	const provider = registeredProviders.get('dshReview.chat').provider;
+	const provider = registeredProviders.get('deepseekHarness.chat').provider;
 	const view = makeView();
 	provider.resolveWebviewView(view, {}, { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => undefined }) });
 	check(typeof view.webview.html === 'string' && view.webview.html.includes('Content-Security-Policy'), '注入带 CSP 的 webview HTML');
@@ -346,7 +346,7 @@ async function main() {
 	check(view.webview.options?.enableScripts === true, 'webview 脚本已启用');
 
 	console.log('  … 打开侧边栏并启动真实 DSH ACP 运行时');
-	await commandHandlers.get('dshReview.openChat')();
+	await commandHandlers.get('deepseekHarness.openChat')();
 	await waitFor(() => lastState()?.runtime?.phase === 'ready', 120000, '运行时 ready');
 	const state = lastState();
 	check(state.runtime.protocolVersion === 1, `ACP protocolVersion=${String(state.runtime.protocolVersion)}`);
@@ -386,7 +386,7 @@ async function main() {
 
 	console.log('  … 运行一次真实代码审查');
 	const reviewUri = Uri.file(path.join(cwd, 'src', 'types.ts'));
-	await commandHandlers.get('dshReview.reviewFile')(reviewUri);
+	await commandHandlers.get('deepseekHarness.reviewFile')(reviewUri);
 	await waitFor(() => posted.some((message) => message.type === 'findings'), 180000, '审查结果推送到侧边栏');
 	const findingsMessage = posted.filter((message) => message.type === 'findings').pop();
 	check(Array.isArray(findingsMessage.findings), `审查结果已推送（findings=${findingsMessage.findings.length}）`);
