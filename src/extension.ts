@@ -11,6 +11,7 @@ import { createAutoContextCollector } from './context/autoContext';
 import { Logger } from './log';
 import { formatModelValue, normalizeModelOptions, parseModelValue, readDshPreferredModel, sameModelRef, type ModelRef } from './model';
 import type { ReviewInput, ReviewService } from './review/contracts';
+import { registerFixCodeActions } from './review/quickFix';
 import { createReviewService } from './review/service';
 import { createSessionService } from './session/manager';
 import { createTranscriptStore } from './session/transcript';
@@ -121,6 +122,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 	private disposeSubscriptions: vscode.Disposable[] = [];
 	private disposed = false;
 	private lastRuntimeErrorShown?: string;
+	private localTitle?: string;
 
 	constructor(context: vscode.ExtensionContext, logger: Logger) {
 		this.context = context;
@@ -168,6 +170,18 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			}),
 			vscode.window.onDidChangeActiveTextEditor(() => this.scheduleAutoContextRefresh()),
 			vscode.window.onDidChangeTextEditorSelection(() => this.scheduleAutoContextRefresh()),
+			vscode.window.registerUriHandler({
+				handleUri: async () => {
+					await this.openChat();
+				},
+			}),
+		);
+		this.disposeSubscriptions.push(
+			registerFixCodeActions({
+				findings: () => this.findings,
+				workspaceRoot: () => readConfig().workspaceRoot,
+				log: this.logger,
+			}),
 		);
 		this.statusBar = createStatusBar(() => {
 			void vscode.commands.executeCommand('deepseekHarness.openChat');
@@ -191,6 +205,8 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		register('deepseekHarness.reviewStaged', () => this.reviewDiff('staged'));
 		register('deepseekHarness.reviewCommit', () => this.reviewDiff('commit'));
 		register('deepseekHarness.fixFindings', () => this.fixFindings());
+		register('deepseekHarness.fixFinding', (finding?: unknown) => this.fixFinding(finding));
+		register('deepseekHarness.revertTurnChanges', () => this.revertTurnChanges());
 		register('deepseekHarness.showTurnChanges', () => this.showTurnChanges());
 		register('deepseekHarness.clearFindings', () => this.clearFindings());
 		register('deepseekHarness.newSession', () => this.newSession());
@@ -207,7 +223,11 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		return {
 			runtime,
 			session: this.activeSession
-				? { sessionId: this.activeSession.sessionId, cwd: this.activeSession.cwd, title: this.activeSession.title }
+				? {
+						sessionId: this.activeSession.sessionId,
+						cwd: this.activeSession.cwd,
+						title: this.deriveLocalTitle(),
+					}
 				: undefined,
 			busy: this.busy,
 			configOptions: this.configOptions,
@@ -217,6 +237,19 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			usage: this.usage,
 			autoContext: this.autoContextInfo,
 		};
+	}
+
+	/** Local title from the first user message (ACP exposes no title surface). */
+	private deriveLocalTitle(): string | undefined {
+		const explicit = this.activeSession?.title;
+		if (explicit && explicit.trim().length > 0) return explicit;
+		for (const entry of this.transcript) {
+			if (entry.kind === 'user' && entry.text.trim().length > 0) {
+				const singleLine = entry.text.replace(/\s+/g, ' ').trim();
+				return singleLine.length > 36 ? `${singleLine.slice(0, 36)}…` : singleLine;
+			}
+		}
+		return undefined;
 	}
 
 	private failedState(): RuntimeState | undefined {
@@ -803,6 +836,19 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		} catch {
 			/* container id differs on older VS Code; the reveal below still works */
 		}
+		// Secondary sidebar is not always focused/opened by the view-container
+		// command (e.g. when the view has never been resolved). Try the built-in
+		// focus/toggle commands as a fallback so URI opens and the status bar work.
+		if (!(this.provider?.isVisible() ?? false)) {
+			for (const command of ['workbench.action.focusAuxiliaryBar', 'workbench.action.toggleAuxiliaryBar']) {
+				try {
+					await vscode.commands.executeCommand(command);
+					if (this.provider?.isVisible()) break;
+				} catch {
+					/* older VS Code may not expose this command; ignore */
+				}
+			}
+		}
 		await this.provider?.reveal();
 		this.provider?.postState();
 		this.ensureReady().catch((error: unknown) => {
@@ -893,6 +939,32 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		}
 	}
 
+	async fixFinding(input: unknown): Promise<void> {
+		if (!this.review) return;
+		const finding = input as Finding;
+		if (
+			typeof finding !== 'object' ||
+			finding === null ||
+			typeof finding.file !== 'string' ||
+			typeof finding.line !== 'number'
+		) {
+			void vscode.window.showWarningMessage('无效的审查发现，已取消修复。');
+			return;
+		}
+		await vscode.commands.executeCommand('deepseekHarness.openChat');
+		const prompt = fixPrompt(JSON.stringify([finding], null, 2));
+		try {
+			await this.review.beginChanges();
+			await this.runPrompt(`修复 ${finding.file}:${finding.line}`, [{ type: 'text', text: prompt }]);
+			const changed = (await this.review.endChanges()) ?? [];
+			this.lastTurnChanges = changed;
+			this.appendNotice('info', changed.length > 0 ? `修复完成，本轮改动 ${changed.length} 个文件。` : '修复完成，未检测到文件改动。');
+			await this.notifyChanges(changed);
+		} catch (error) {
+			this.appendNotice('error', `修复失败：${errorMessage(error)}`);
+		}
+	}
+
 	private async showTurnChanges(): Promise<void> {
 		if (!this.review) return;
 		if (this.lastTurnChanges.length === 0) {
@@ -902,14 +974,50 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		await this.review.showChanges(this.lastTurnChanges);
 	}
 
+	private async revertTurnChanges(): Promise<void> {
+		if (!this.review?.canRevert()) {
+			void vscode.window.showInformationMessage('没有可撤销的本轮改动（需要 git 仓库且本轮有改动）。');
+			return;
+		}
+		const confirm = await vscode.window.showWarningMessage(
+			'撤销本轮修改？',
+			{
+				modal: true,
+				detail: '将把本轮改动的文件恢复到本轮开始前，并删除本轮新建的文件。若文件在本轮之后被手动修改过，会整体拒绝。',
+			},
+			'撤销',
+		);
+		if (confirm !== '撤销') return;
+		try {
+			const result = await this.review.revertLastTurn();
+			if (result.ok) {
+				this.lastTurnChanges = [];
+				this.appendNotice('info', `已撤销本轮修改：${result.reverted.length} 个文件。`);
+				void vscode.window.showInformationMessage(`已撤销 ${result.reverted.length} 个文件的本轮修改。`);
+			} else {
+				const detail = result.error ?? '未知原因';
+				this.appendNotice('warn', `撤销本轮修改被拒绝或失败：${detail}`);
+				void vscode.window.showWarningMessage(`撤销失败：${detail}`);
+			}
+			for (const skipped of result.skipped) {
+				this.logger.warn(`撤销跳过 ${skipped.path}：${skipped.reason}`);
+			}
+		} catch (error) {
+			this.appendNotice('error', `撤销本轮修改失败：${errorMessage(error)}`);
+		}
+	}
+
 	private async notifyChanges(changed: string[]): Promise<void> {
 		if (changed.length === 0 || !readConfig().showChangesNotice) return;
+		const buttons = this.review?.canRevert()
+			? ['查看差异', '撤销本轮修改', '忽略']
+			: ['查看差异', '忽略'];
 		const action = await vscode.window.showInformationMessage(
 			`DSH 本轮修改了 ${changed.length} 个文件：${changed.slice(0, 3).join(', ')}${changed.length > 3 ? ' …' : ''}`,
-			'查看差异',
-			'忽略',
+			...buttons,
 		);
 		if (action === '查看差异') await this.review?.showChanges(changed);
+		else if (action === '撤销本轮修改') await this.revertTurnChanges();
 	}
 
 	// ------------------------------------------------------------- history ---

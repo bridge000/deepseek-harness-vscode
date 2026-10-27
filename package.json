@@ -1,11 +1,19 @@
 {
   "name": "deepseek-harness",
   "displayName": "DeepSeek Harness",
-  "description": "把 DeepSeek Harness 接入 VS Code 侧边栏：聊天 + 文件级代码审查（非官方社区扩展，ACP 自动化接口）",
-  "version": "0.2.0",
+  "description": "把 DeepSeek Harness 接入 VS Code 侧边栏：聊天 + 文件级代码审查 + Quick Fix（非官方社区扩展，ACP 自动化接口）",
+  "version": "0.3.0",
   "publisher": "xliang",
+  "author": "xliang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xliang/deepseek-harness-vscode.git"
+  },
+  "homepage": "https://github.com/xliang/deepseek-harness-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/xliang/deepseek-harness-vscode/issues"
+  },
   "license": "MIT",
-  "private": true,
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -26,7 +34,8 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onView:deepseekHarness.chat"
+    "onView:deepseekHarness.chat",
+    "onUri"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -93,6 +102,16 @@
       {
         "command": "deepseekHarness.fixFindings",
         "title": "DeepSeek Harness: 修复最近审查发现的问题",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.fixFinding",
+        "title": "DeepSeek Harness: 修复这个问题",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.revertTurnChanges",
+        "title": "DeepSeek Harness: 撤销本轮修改",
         "category": "DeepSeek Harness"
       },
       {
@@ -205,6 +224,13 @@
         },
         {
           "command": "deepseekHarness.fixFindings"
+        },
+        {
+          "command": "deepseekHarness.fixFinding",
+          "when": "false"
+        },
+        {
+          "command": "deepseekHarness.revertTurnChanges"
         },
         {
           "command": "deepseekHarness.showTurnChanges"

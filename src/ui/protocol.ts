@@ -59,6 +59,7 @@ export type WebviewToExt =
 	| { type: 'pickContext' }
 	| { type: 'openFile'; path: string; line?: number }
 	| { type: 'runCommand'; command: CommandId }
+	| { type: 'fixFinding'; finding: Finding }
 	| { type: 'clearFindings' }
 	| { type: 'restartRuntime' }
 	| { type: 'openSettings' }
@@ -79,6 +80,7 @@ export function isWebviewToExt(value: unknown): value is WebviewToExt {
 		type === 'pickContext' ||
 		type === 'openFile' ||
 		type === 'runCommand' ||
+		type === 'fixFinding' ||
 		type === 'clearFindings' ||
 		type === 'restartRuntime' ||
 		type === 'openSettings' ||

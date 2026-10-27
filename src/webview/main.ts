@@ -1,10 +1,13 @@
 /**
  * DeepSeek Harness 侧边栏聊天前端（原生 TypeScript + DOM，无框架）。
  *
- * 只依赖 DOM 与纯模块（`../acp/protocol` 的 `findConfigOption`、`./markdown`），
- * 不 import vscode。与扩展的通信全部走 `acquireVsCodeApi().postMessage`，
- * 消息形状见 `../ui/protocol.ts`；扩展推送的增量消息（append/patch/busy/...）
- * 与全量 state 都能渲染。
+ * 只依赖 DOM 与纯模块（`../acp/protocol` 的 `findConfigOption`、`./markdown`、
+ * `./thought`、`./format`），不 import vscode。与扩展的通信全部走
+ * `acquireVsCodeApi().postMessage`，消息形状见 `../ui/protocol.ts`；扩展推送的
+ * 增量消息（append/patch/busy/...）与全量 state 都能渲染。
+ *
+ * 0.3 UI 迭代：紧凑单行头部、气泡/助手消息、单行工具卡、可折叠 findings、
+ * 圆形输入区、滚动回底浮层、空状态快捷动作。
  */
 import type {
 	AcpCapabilities,
@@ -15,16 +18,32 @@ import type {
 	Finding,
 	PermissionOptionInfo,
 	PermissionRequest,
-	ToolStatus,
+	RuntimePhase,
 	TranscriptEntry,
 	UiState,
-	UsageInfo,
 } from '../types';
 import { findConfigOption } from '../acp/protocol';
 import type { ExtToWeb, WebviewToExt } from '../ui/protocol';
 import { renderMarkdown } from './markdown';
 import { groupThoughtEntries, thoughtHeader } from './thought';
 import type { ThoughtGroup } from './thought';
+import {
+	filterFindings,
+	findingFilterLabel,
+	formatRelativeTime,
+	formatTimestamp,
+	formatToolDuration,
+	formatUsageText,
+	headerTitle,
+	severityCounts,
+	toolKindIcon,
+	toolStatusGlyph,
+	toolStatusLabel,
+	truncateTitle,
+} from './format';
+import type { FindingFilter } from './format';
+
+type ToolEntry = Extract<TranscriptEntry, { kind: 'tool' }>;
 
 interface VsCodeApi {
 	postMessage(message: WebviewToExt): void;
@@ -80,10 +99,6 @@ function requiredElement(id: string): HTMLElement {
 	return node;
 }
 
-function shorten(value: string, max: number): string {
-	return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
-}
-
 function emptyCapabilities(): AcpCapabilities {
 	return {
 		sessionList: false,
@@ -126,35 +141,14 @@ function isTranscriptEntry(value: unknown): value is TranscriptEntry {
 	return typeof entry.id === 'string' && typeof entry.kind === 'string' && ENTRY_KINDS.has(entry.kind);
 }
 
-const TOOL_STATUS_LABELS: Record<ToolStatus, string> = {
-	pending: '等待',
-	in_progress: '执行中',
-	completed: '完成',
-	failed: '失败',
+const SEVERITY_LABELS: Record<Finding['severity'], string> = {
+	error: '错误',
+	warning: '警告',
+	info: '提示',
 };
 
-function formatTimestamp(at: number): string {
-	const date = new Date(at);
-	if (Number.isNaN(date.getTime())) return '';
-	const pad = (value: number): string => String(value).padStart(2, '0');
-	const now = new Date();
-	const sameDay =
-		date.getFullYear() === now.getFullYear() &&
-		date.getMonth() === now.getMonth() &&
-		date.getDate() === now.getDate();
-	const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-	return sameDay ? clock : `${date.getMonth() + 1}/${date.getDate()} ${clock}`;
-}
-
-function formatUsage(usage: UsageInfo): string {
-	const parts: string[] = [];
-	if (typeof usage.inputTokens === 'number') parts.push(`↑${usage.inputTokens}`);
-	if (typeof usage.outputTokens === 'number') parts.push(`↓${usage.outputTokens}`);
-	if (typeof usage.totalTokens === 'number') parts.push(`共 ${usage.totalTokens}`);
-	return parts.length > 0 ? `tokens ${parts.join(' ')}` : '';
-}
-
-function currentConfigValue(option: ConfigOption): string {
+function currentConfigValue(option: ConfigOption | undefined): string {
+	if (!option) return '';
 	const value = option.currentValue;
 	if (typeof value === 'string') return value;
 	if (typeof value === 'object' && value !== null) {
@@ -164,27 +158,37 @@ function currentConfigValue(option: ConfigOption): string {
 	return '';
 }
 
+function currentConfigLabel(option: ConfigOption | undefined): string {
+	const value = currentConfigValue(option);
+	if (!value) return '';
+	const match = option?.values.find((item) => item.value === value);
+	return match?.name ?? value;
+}
+
 // ---------------------------------------------------------------------------
 // 界面骨架
 // ---------------------------------------------------------------------------
 
 interface UiRefs {
 	statusDot: HTMLSpanElement;
-	statusText: HTMLSpanElement;
-	statusMeta: HTMLDivElement;
-	btnNew: HTMLButtonElement;
-	btnHistory: HTMLButtonElement;
-	btnRestart: HTMLButtonElement;
-	btnSettings: HTMLButtonElement;
+	sessionTitle: HTMLSpanElement;
+	modelPill: HTMLSpanElement;
+	menuButton: HTMLButtonElement;
+	menu: HTMLDivElement;
 	historyPanel: HTMLDivElement;
 	banner: HTMLDivElement;
 	bannerText: HTMLSpanElement;
 	bannerClose: HTMLButtonElement;
+	mainArea: HTMLDivElement;
 	scroll: HTMLElement;
 	transcript: HTMLDivElement;
 	emptyState: HTMLDivElement;
+	jumpButton: HTMLButtonElement;
 	findingsSection: HTMLElement;
+	findingsToggle: HTMLButtonElement;
+	findingsChevron: HTMLSpanElement;
 	findingsCount: HTMLSpanElement;
+	findingsFilters: HTMLDivElement;
 	findingsList: HTMLDivElement;
 	btnFindingsFix: HTMLButtonElement;
 	btnFindingsClear: HTMLButtonElement;
@@ -197,33 +201,36 @@ interface UiRefs {
 	chips: HTMLDivElement;
 	input: HTMLTextAreaElement;
 	btnPickContext: HTMLButtonElement;
-	btnSend: HTMLButtonElement;
 	modelWrap: HTMLLabelElement;
 	modelSelect: HTMLSelectElement;
 	reasoningWrap: HTMLLabelElement;
 	reasoningSelect: HTMLSelectElement;
+	btnSend: HTMLButtonElement;
 	toast: HTMLDivElement;
 }
 
 function buildUi(root: HTMLElement): UiRefs {
 	root.classList.add('app');
 
-	// 顶部：状态 + 操作按钮
+	// 顶部：状态点 + 本地标题 + 模型 pill + 「⋯」菜单（版本/ACP/token 在状态点 tooltip）
 	const topbar = el('header', 'topbar');
-	const statusRow = el('div', 'status-row');
+	const identity = el('div', 'identity');
 	const statusDot = el('span', 'status-dot');
 	statusDot.setAttribute('aria-hidden', 'true');
-	const statusText = el('span', 'status-text', '未连接');
-	statusRow.append(statusDot, statusText);
-	const statusMeta = el('div', 'status-meta');
-	statusMeta.hidden = true;
-	const actions = el('div', 'topbar-actions');
-	const btnNew = button('新建', '新建会话');
-	const btnHistory = button('历史', '会话历史');
-	const btnRestart = button('重启', '重启 DSH 运行时');
-	const btnSettings = button('设置', '打开 DeepSeek Harness 设置');
-	actions.append(btnNew, btnHistory, btnRestart, btnSettings);
-	topbar.append(statusRow, statusMeta, actions);
+	statusDot.tabIndex = 0;
+	statusDot.setAttribute('role', 'img');
+	const sessionTitle = el('span', 'session-title', '未连接');
+	identity.append(statusDot, sessionTitle);
+	const modelPill = el('span', 'model-pill');
+	modelPill.hidden = true;
+	const menuButton = button('⋯', '更多操作', 'icon-button menu-button');
+	menuButton.setAttribute('aria-haspopup', 'menu');
+	menuButton.setAttribute('aria-expanded', 'false');
+	const menu = el('div', 'menu');
+	menu.hidden = true;
+	menu.setAttribute('role', 'menu');
+	menu.setAttribute('aria-label', '更多操作');
+	topbar.append(identity, modelPill, menuButton, menu);
 
 	// 历史会话下拉
 	const historyPanel = el('div', 'history-panel');
@@ -238,7 +245,8 @@ function buildUi(root: HTMLElement): UiRefs {
 	bannerClose.className = 'icon-button';
 	banner.append(bannerText, bannerClose);
 
-	// 滚动区：消息流 + 空状态 + findings
+	// 主区域：消息流 + 空状态 + findings + 回到底部浮层
+	const mainArea = el('div', 'main-area');
 	const scroll = el('main', 'scroll-area');
 	const transcript = el('div', 'transcript');
 	transcript.setAttribute('role', 'log');
@@ -249,18 +257,29 @@ function buildUi(root: HTMLElement): UiRefs {
 	const findingsSection = el('section', 'findings');
 	findingsSection.hidden = true;
 	const findingsHeader = el('div', 'findings-header');
-	const findingsTitle = el('span', 'findings-title', '审查结果');
+	const findingsToggle = button('', '折叠审查结果', 'findings-toggle');
+	findingsToggle.setAttribute('aria-expanded', 'true');
+	const findingsChevron = el('span', 'findings-chevron', '▾');
+	findingsChevron.setAttribute('aria-hidden', 'true');
 	const findingsCount = el('span', 'findings-count');
-	findingsHeader.append(findingsTitle, findingsCount);
-	const findingsSpacer = el('span', 'spacer');
-	findingsHeader.append(findingsSpacer);
-	const btnFindingsFix = button('修复', '让 DSH 修复这些发现');
-	const btnFindingsClear = button('清除', '清除审查结果');
-	findingsHeader.append(btnFindingsFix, btnFindingsClear);
+	findingsToggle.append(findingsChevron, el('span', 'findings-title', '审查结果'), findingsCount);
+	const findingsActions = el('div', 'findings-actions');
+	const btnFindingsFix = button('修复全部', '让 DSH 修复这些发现', 'ghost-button');
+	const btnFindingsClear = button('清除', '清除审查结果', 'ghost-button');
+	findingsActions.append(btnFindingsFix, btnFindingsClear);
+	findingsHeader.append(findingsToggle, el('span', 'spacer'), findingsActions);
+	const findingsFilters = el('div', 'findings-filters');
+	findingsFilters.setAttribute('role', 'toolbar');
+	findingsFilters.setAttribute('aria-label', '按严重级别筛选');
 	const findingsList = el('div', 'findings-list');
-	findingsSection.append(findingsHeader, findingsList);
+	findingsSection.append(findingsHeader, findingsFilters, findingsList);
 
 	scroll.append(transcript, emptyState, findingsSection);
+	const jumpButton = el('button', 'scroll-jump', '↓ 回到底部');
+	jumpButton.type = 'button';
+	jumpButton.hidden = true;
+	jumpButton.title = '回到底部';
+	mainArea.append(scroll, jumpButton);
 
 	// 权限确认卡片（固定在输入框上方）
 	const permission = el('section', 'permission');
@@ -273,19 +292,20 @@ function buildUi(root: HTMLElement): UiRefs {
 	const permissionActions = el('div', 'permission-actions');
 	permission.append(permissionTitle, permissionMeta, permissionBody, permissionActions);
 
-	// 输入区
+	// 输入区：圆角容器，顶部自动上下文 chip，底部工具条
 	const composer = el('div', 'composer');
+	const shell = el('div', 'composer-shell');
 	const autoContextBar = el('div', 'auto-context-bar');
 	autoContextBar.hidden = true;
 	autoContextBar.setAttribute('aria-label', '自动上下文');
 	const chips = el('div', 'context-chips');
 	chips.hidden = true;
 	const input = el('textarea', 'composer-input');
-	input.rows = 2;
+	input.rows = 1;
 	input.placeholder = '给 DSH 发消息…';
 	input.setAttribute('aria-label', '消息输入框');
 	const composerBar = el('div', 'composer-bar');
-	const btnPickContext = button('＋ 上下文', '把文件/文件夹加入上下文');
+	const btnPickContext = button('＋ 上下文', '把文件/文件夹加入上下文', 'ghost-button pick-context');
 	const selectors = el('div', 'composer-selectors');
 	const modelWrap = el('label', 'select-wrap');
 	modelWrap.hidden = true;
@@ -298,9 +318,11 @@ function buildUi(root: HTMLElement): UiRefs {
 	reasoningSelect.setAttribute('aria-label', '选择推理强度');
 	reasoningWrap.append(el('span', 'select-label', '推理'), reasoningSelect);
 	selectors.append(modelWrap, reasoningWrap);
-	const btnSend = button('发送', '发送（Enter）', 'primary-button');
+	const btnSend = button('➤', '发送（Enter）', 'send-button');
 	composerBar.append(btnPickContext, selectors, btnSend);
-	composer.append(autoContextBar, chips, input, composerBar);
+	const hint = el('div', 'composer-hint', 'Enter 发送 · Shift+Enter 换行 · Esc 停止');
+	shell.append(autoContextBar, chips, input, composerBar, hint);
+	composer.append(shell);
 
 	// 临时提示
 	const toast = el('div', 'toast');
@@ -308,25 +330,28 @@ function buildUi(root: HTMLElement): UiRefs {
 	toast.setAttribute('role', 'status');
 	toast.setAttribute('aria-live', 'polite');
 
-	root.append(topbar, historyPanel, banner, scroll, permission, composer, toast);
+	root.append(topbar, historyPanel, banner, mainArea, permission, composer, toast);
 
 	return {
 		statusDot,
-		statusText,
-		statusMeta,
-		btnNew,
-		btnHistory,
-		btnRestart,
-		btnSettings,
+		sessionTitle,
+		modelPill,
+		menuButton,
+		menu,
 		historyPanel,
 		banner,
 		bannerText,
 		bannerClose,
+		mainArea,
 		scroll,
 		transcript,
 		emptyState,
+		jumpButton,
 		findingsSection,
+		findingsToggle,
+		findingsChevron,
 		findingsCount,
+		findingsFilters,
 		findingsList,
 		btnFindingsFix,
 		btnFindingsClear,
@@ -339,11 +364,11 @@ function buildUi(root: HTMLElement): UiRefs {
 		chips,
 		input,
 		btnPickContext,
-		btnSend,
 		modelWrap,
 		modelSelect,
 		reasoningWrap,
 		reasoningSelect,
+		btnSend,
 		toast,
 	};
 }
@@ -390,6 +415,11 @@ function persistAutoContextEnabled(): void {
 	}
 }
 
+// UI 本地视图状态：findings 筛选/折叠、回到底部的新消息计数、工具卡展开/耗时。
+let findingsFilter: FindingFilter = 'all';
+let findingsCollapsed = false;
+let pendingNewCount = 0;
+
 const entryNodes = new Map<string, HTMLElement>();
 const refs = buildUi(requiredElement('app'));
 
@@ -404,6 +434,29 @@ function isNearBottom(): boolean {
 
 function scrollToBottom(): void {
 	refs.scroll.scrollTop = refs.scroll.scrollHeight;
+}
+
+function renderJumpButton(): void {
+	const nearBottom = isNearBottom();
+	refs.jumpButton.hidden = nearBottom;
+	refs.jumpButton.textContent = pendingNewCount > 0 ? `↓ ${pendingNewCount} 条新消息` : '↓ 回到底部';
+	refs.jumpButton.title = pendingNewCount > 0 ? '跳到最新消息' : '回到底部';
+}
+
+/** 新内容到达时按「是否贴底」决定自动滚动，还是累计「新消息」提示。 */
+function handleNewContent(stick: boolean): void {
+	if (stick) {
+		scrollToBottom();
+		return;
+	}
+	pendingNewCount += 1;
+	renderJumpButton();
+}
+
+function jumpToBottom(): void {
+	pendingNewCount = 0;
+	scrollToBottom();
+	renderJumpButton();
 }
 
 // ---------------------------------------------------------------------------
@@ -517,7 +570,7 @@ function refreshThoughtGroup(group: ThoughtGroup): void {
 	}
 }
 
-/** 该消息的第一条助手正文到达后自动收起思考链（用户手动展开过的也收，符合 Claude Code 行为）。 */
+/** 该消息的第一条助手正文到达后自动收起思考链（符合 Claude Code 行为）。 */
 function autoCollapseThoughts(messageId: string | undefined): void {
 	if (!messageId) return;
 	for (const group of thoughtGroups) {
@@ -531,11 +584,38 @@ function autoCollapseThoughts(messageId: string | undefined): void {
 	}
 }
 
-/** 会话切换后清掉不再存在的思考状态，避免 Map 无限增长。 */
-function pruneThoughtStates(): void {
-	for (const id of [...thoughtStates.keys()]) {
-		if (!thoughtIndex.has(id)) thoughtStates.delete(id);
+// ---------------------------------------------------------------------------
+// 工具卡：一行「图标 + 工具名 + 状态点 + kind/耗时」，点击展开详情
+// ---------------------------------------------------------------------------
+
+interface ToolViewState {
+	expanded: boolean;
+	startedAt?: number;
+	durationMs?: number;
+}
+
+const toolViews = new Map<string, ToolViewState>();
+
+function toolViewState(entry: ToolEntry): ToolViewState {
+	let view = toolViews.get(entry.id);
+	if (!view) {
+		view = { expanded: false, startedAt: typeof entry.at === 'number' ? entry.at : Date.now() };
+		toolViews.set(entry.id, view);
 	}
+	if (view.startedAt === undefined) view.startedAt = entry.at;
+	if (
+		(entry.status === 'completed' || entry.status === 'failed') &&
+		view.durationMs === undefined &&
+		typeof view.startedAt === 'number'
+	) {
+		view.durationMs = Math.max(0, Date.now() - view.startedAt);
+	}
+	return view;
+}
+
+function toolDurationLabel(view: ToolViewState): string {
+	if (view.durationMs === undefined) return '';
+	return `耗时 ${formatToolDuration(view.durationMs)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -548,102 +628,165 @@ function refsRow(refsList: readonly ContextRef[]): HTMLElement {
 	return row;
 }
 
-function createEntryNode(entry: TranscriptEntry): HTMLElement {
-	const node = el('div', `entry entry-${entry.kind}`);
+function createUserEntry(entry: Extract<TranscriptEntry, { kind: 'user' }>): HTMLElement {
+	const node = el('div', 'entry entry-user');
 	node.dataset.entryId = entry.id;
+	node.append(el('div', 'user-bubble', entry.text));
+	if (entry.refs && entry.refs.length > 0) node.append(refsRow(entry.refs));
 	const time = formatTimestamp(entry.at);
-	if (time) node.title = time;
+	if (time) node.append(el('div', 'msg-meta msg-meta-user', time));
+	return node;
+}
 
-	switch (entry.kind) {
-		case 'user': {
-			node.append(el('div', 'entry-label', '你'));
-			const bubble = el('div', 'user-bubble', entry.text);
-			node.append(bubble);
-			if (entry.refs && entry.refs.length > 0) node.append(refsRow(entry.refs));
-			break;
-		}
-		case 'assistant': {
-			node.append(el('div', 'entry-label', 'DSH'));
-			node.append(markdownBody(entry.text, entry.streaming === true));
-			break;
-		}
-		case 'thought': {
-			const group = thoughtIndex.get(entry.id);
-			if (!group || group.id !== entry.id) {
-				// 同组条目合并到首条渲染，其余只保留一个隐藏占位节点供 patch 定位。
-				node.hidden = true;
-				node.classList.add('thought-ghost');
-				break;
-			}
-			node.classList.add('thought-chain');
-			const view = thoughtViewState(group);
-			const header = thoughtHeader({
-				streaming: group.streaming,
-				durationMs: view.durationMs,
-				hasBody: group.text.trim().length > 0,
-			});
-			const row = el('button', 'thought-row');
-			row.type = 'button';
-			const chevron = el('span', 'thought-chevron', view.expanded ? '▾' : '▸');
-			chevron.setAttribute('aria-hidden', 'true');
-			const spark = el('span', 'thought-spark', group.streaming ? '✻' : '✦');
-			spark.setAttribute('aria-hidden', 'true');
-			if (group.streaming) spark.classList.add('is-streaming');
-			row.append(chevron, spark, el('span', 'thought-label', header.label));
-			if (header.detail) row.append(el('span', 'thought-detail', header.detail));
-			row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
-			row.title = header.detail ? `${header.label}（${header.detail}）` : header.label;
-			const body = el('div', 'thought-body');
-			body.hidden = !view.expanded;
-			if (group.text.length > 0) body.append(markdownBody(group.text, group.streaming));
-			const toggle = (): void => {
-				view.expanded = !view.expanded;
-				row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
-				chevron.textContent = view.expanded ? '▾' : '▸';
-				body.hidden = !view.expanded;
-			};
-			row.addEventListener('click', toggle);
-			node.append(row, body);
-			break;
-		}
-		case 'tool': {
-			const head = el('div', 'tool-head');
-			head.append(el('span', 'tool-title', entry.title || '工具调用'));
-			head.append(
-				el('span', `status-badge status-${entry.status}`, TOOL_STATUS_LABELS[entry.status] ?? entry.status),
-			);
-			node.append(head);
-			const meta = el('div', 'tool-meta');
-			if (entry.toolKind) meta.append(el('span', 'tool-kind', entry.toolKind));
-			for (const location of entry.locations ?? []) {
+function createAssistantEntry(entry: Extract<TranscriptEntry, { kind: 'assistant' }>): HTMLElement {
+	const node = el('div', 'entry entry-assistant');
+	node.dataset.entryId = entry.id;
+	const roleRow = el('div', 'role-row');
+	roleRow.append(el('span', 'role-name', 'DSH'));
+	if (entry.streaming === true) roleRow.append(el('span', 'role-streaming', '生成中…'));
+	const time = formatTimestamp(entry.at);
+	if (time) roleRow.append(el('span', 'hover-meta', time));
+	const copy = button('复制', '复制这条回答', 'copy-answer');
+	copy.addEventListener('click', () => {
+		void copyText(entry.text).then(() => {
+			copy.textContent = '已复制';
+			window.setTimeout(() => {
+				copy.textContent = '复制';
+			}, 1200);
+		});
+	});
+	roleRow.append(copy);
+	node.append(roleRow, markdownBody(entry.text, entry.streaming === true));
+	return node;
+}
+
+function createThoughtEntry(entry: Extract<TranscriptEntry, { kind: 'thought' }>): HTMLElement {
+	const node = el('div', 'entry entry-thought');
+	node.dataset.entryId = entry.id;
+	const group = thoughtIndex.get(entry.id);
+	if (!group || group.id !== entry.id) {
+		// 同组条目合并到首条渲染，其余只保留一个隐藏占位节点供 patch 定位。
+		node.hidden = true;
+		node.classList.add('thought-ghost');
+		return node;
+	}
+	node.classList.add('thought-chain');
+	const view = thoughtViewState(group);
+	const header = thoughtHeader({
+		streaming: group.streaming,
+		durationMs: view.durationMs,
+		hasBody: group.text.trim().length > 0,
+	});
+	const row = el('button', 'thought-row');
+	row.type = 'button';
+	const chevron = el('span', 'thought-chevron', view.expanded ? '▾' : '▸');
+	chevron.setAttribute('aria-hidden', 'true');
+	const spark = el('span', 'thought-spark', group.streaming ? '✻' : '✦');
+	spark.setAttribute('aria-hidden', 'true');
+	if (group.streaming) spark.classList.add('is-streaming');
+	row.append(chevron, spark, el('span', 'thought-label', header.label));
+	if (header.detail) row.append(el('span', 'thought-detail', header.detail));
+	const time = formatTimestamp(group.at);
+	if (time) row.append(el('span', 'hover-meta', time));
+	row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
+	row.title = header.detail ? `${header.label}（${header.detail}）` : header.label;
+	const body = el('div', 'thought-body');
+	body.hidden = !view.expanded;
+	if (group.text.length > 0) body.append(markdownBody(group.text, group.streaming));
+	const toggle = (): void => {
+		view.expanded = !view.expanded;
+		row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
+		chevron.textContent = view.expanded ? '▾' : '▸';
+		body.hidden = !view.expanded;
+	};
+	row.addEventListener('click', toggle);
+	node.append(row, body);
+	return node;
+}
+
+function createToolEntry(entry: ToolEntry): HTMLElement {
+	const node = el('div', 'entry entry-tool');
+	node.dataset.entryId = entry.id;
+	const view = toolViewState(entry);
+	const hasBody =
+		(entry.locations?.length ?? 0) > 0 || (typeof entry.detail === 'string' && entry.detail.length > 0);
+	const row = hasBody ? el('button', 'tool-row') : el('div', 'tool-row');
+	if (hasBody) (row as HTMLButtonElement).type = 'button';
+	const icon = el('span', 'tool-icon', toolKindIcon(entry.toolKind));
+	icon.setAttribute('aria-hidden', 'true');
+	const title = el('span', 'tool-title', entry.title || '工具调用');
+	row.append(icon, title);
+	if (entry.toolKind) row.append(el('span', 'tool-kind', entry.toolKind));
+	const duration = toolDurationLabel(view);
+	if (duration) row.append(el('span', 'tool-duration', duration));
+	const status = el('span', `tool-status status-${entry.status}`, toolStatusGlyph(entry.status));
+	status.title = toolStatusLabel(entry.status);
+	status.setAttribute('aria-label', toolStatusLabel(entry.status));
+	row.append(status);
+	if (hasBody) {
+		const chevron = el('span', 'tool-chevron', view.expanded ? '▾' : '▸');
+		chevron.setAttribute('aria-hidden', 'true');
+		row.append(chevron);
+		row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
+		const body = el('div', 'tool-body');
+		body.hidden = !view.expanded;
+		const locations = entry.locations ?? [];
+		if (locations.length > 0) {
+			const locationRow = el('div', 'tool-locations');
+			for (const location of locations) {
 				const label = location.line ? `${location.path}:${location.line}` : location.path;
-				const link = button(label, `打开 ${location.path}`);
-				link.className = 'link-button';
+				const link = button(label, `打开 ${location.path}`, 'link-button');
 				link.addEventListener('click', () => {
 					post({ type: 'openFile', path: location.path, line: location.line });
 				});
-				meta.append(link);
+				locationRow.append(link);
 			}
-			if (meta.childElementCount > 0) node.append(meta);
-			if (entry.detail) {
-				const detail = el('details', 'tool-detail');
-				const pre = el('pre', 'tool-detail-text', entry.detail);
-				detail.append(el('summary', '', '详情'), pre);
-				node.append(detail);
-			}
-			break;
+			body.append(locationRow);
 		}
-		case 'notice': {
-			node.classList.add(`notice-${entry.level}`);
-			node.textContent = entry.text;
-			break;
-		}
-		default: {
-			node.textContent = JSON.stringify(entry);
-		}
+		if (entry.detail) body.append(el('pre', 'tool-detail-text', entry.detail));
+		row.addEventListener('click', () => {
+			view.expanded = !view.expanded;
+			row.setAttribute('aria-expanded', view.expanded ? 'true' : 'false');
+			chevron.textContent = view.expanded ? '▾' : '▸';
+			body.hidden = !view.expanded;
+		});
+		node.append(row, body);
+	} else {
+		node.append(row);
 	}
-
 	return node;
+}
+
+function createEntryNode(entry: TranscriptEntry): HTMLElement {
+	switch (entry.kind) {
+		case 'user':
+			return createUserEntry(entry);
+		case 'assistant':
+			return createAssistantEntry(entry);
+		case 'thought':
+			return createThoughtEntry(entry);
+		case 'tool':
+			return createToolEntry(entry);
+		case 'notice': {
+			const node = el('div', `entry entry-notice notice-${entry.level}`);
+			node.dataset.entryId = entry.id;
+			const glyph = entry.level === 'error' ? '✕' : entry.level === 'warn' ? '⚠' : 'ℹ';
+			node.append(el('span', 'notice-icon', glyph), el('span', 'notice-text', entry.text));
+			return node;
+		}
+		default:
+			return el('div', 'entry', JSON.stringify(entry));
+	}
+}
+
+function pruneEntryViewStates(): void {
+	const ids = new Set(state.ui.transcript.map((entry) => entry.id));
+	for (const id of [...thoughtStates.keys()]) {
+		if (!ids.has(id)) thoughtStates.delete(id);
+	}
+	for (const id of [...toolViews.keys()]) {
+		if (!ids.has(id)) toolViews.delete(id);
+	}
 }
 
 function rebuildTranscript(): void {
@@ -655,10 +798,10 @@ function rebuildTranscript(): void {
 		entryNodes.set(entry.id, node);
 		refs.transcript.append(node);
 	}
-	pruneThoughtStates();
+	pruneEntryViewStates();
 }
 
-function upsertEntry(entry: TranscriptEntry): void {
+function upsertEntry(entry: TranscriptEntry, fresh = false): void {
 	const stick = isNearBottom();
 	rebuildThoughtIndex();
 	if (entry.kind === 'thought') {
@@ -666,7 +809,8 @@ function upsertEntry(entry: TranscriptEntry): void {
 		if (group) {
 			finalizeThoughtGroup(group);
 			refreshThoughtGroup(group);
-			if (stick) scrollToBottom();
+			if (fresh) handleNewContent(stick);
+			else if (stick) scrollToBottom();
 			return;
 		}
 	}
@@ -679,12 +823,26 @@ function upsertEntry(entry: TranscriptEntry): void {
 	if (existing) existing.replaceWith(node);
 	else refs.transcript.append(node);
 	entryNodes.set(entry.id, node);
-	if (stick) scrollToBottom();
+	if (fresh) handleNewContent(stick);
+	else if (stick) scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
-// 各区域渲染
+// 空状态：品牌 + 4 个快捷动作 + 最近 3 个会话
 // ---------------------------------------------------------------------------
+
+function emptyStatusText(phase: RuntimePhase, error: string | undefined): string {
+	switch (phase) {
+		case 'ready':
+			return '发送消息开始对话，或从下面的快捷操作开始。';
+		case 'starting':
+			return '正在启动 DSH 运行时，稍等几秒即可开始。';
+		case 'error':
+			return error || '运行时连接失败，可在「⋯」菜单里重启。';
+		default:
+			return '发送消息会自动启动 DSH 运行时。';
+	}
+}
 
 function renderEmptyState(): void {
 	const empty = refs.emptyState;
@@ -695,78 +853,109 @@ function renderEmptyState(): void {
 	}
 	empty.hidden = false;
 	empty.replaceChildren();
-	const runtime = state.ui.runtime;
-	const title = el('div', 'empty-title');
-	const body = el('div', 'empty-body');
+	const { runtime, history } = state.ui;
+
+	const brand = el('div', 'empty-brand');
+	brand.append(el('div', 'empty-logo', '◈'));
+	brand.append(el('div', 'empty-title', 'DeepSeek Harness'));
+	brand.append(el('div', 'empty-subtitle', '代码审查与对话，都在侧边栏里完成。'));
+	empty.append(brand);
+
+	empty.append(el('div', 'empty-status', emptyStatusText(runtime.phase, runtime.error)));
+
 	const actions = el('div', 'empty-actions');
+	actions.append(
+		actionButton('审查当前文件', '审查当前编辑器里的文件', () => post({ type: 'runCommand', command: 'reviewFile' }), 'empty-action'),
+		actionButton('审查改动', '审查工作区未提交的改动', () => post({ type: 'runCommand', command: 'reviewChanges' }), 'empty-action'),
+		actionButton('解释选区', '解释当前选中的代码', () => post({ type: 'runCommand', command: 'explainSelection' }), 'empty-action'),
+		actionButton('新建会话', '新建一个 DSH 会话', () => post({ type: 'newSession' }), 'empty-action'),
+	);
+	empty.append(actions);
 
-	switch (runtime.phase) {
-		case 'ready': {
-			title.textContent = '开始与 DSH 对话';
-			body.textContent = 'Enter 发送，Shift+Enter 换行；点「＋ 上下文」附加文件。';
-			break;
+	const recent = history.slice(0, 3);
+	if (recent.length > 0) {
+		const recentBox = el('div', 'empty-recent');
+		recentBox.append(el('div', 'empty-recent-title', '最近会话'));
+		for (const info of recent) {
+			const item = button('', `恢复会话 ${info.sessionId}`, 'empty-recent-item');
+			item.append(el('span', 'empty-recent-name', truncateTitle(info.title || info.sessionId, 32)));
+			const relative = formatRelativeTime(info.updatedAt);
+			item.append(el('span', 'empty-recent-meta', relative || info.cwd));
+			item.addEventListener('click', () => {
+				post({ type: 'resumeSession', sessionId: info.sessionId });
+			});
+			recentBox.append(item);
 		}
-		case 'starting': {
-			title.textContent = '正在启动 DSH 运行时…';
-			body.textContent = '首次启动需要几秒钟，请稍候。';
-			break;
-		}
-		case 'error': {
-			title.textContent = 'DSH 运行时连接失败';
-			body.textContent = runtime.error || '请检查可执行文件路径与权限模式设置。';
-			actions.append(
-				actionButton('重启运行时', '重新启动 DSH 运行时', () => post({ type: 'restartRuntime' })),
-				actionButton('打开设置', '打开 DeepSeek Harness 设置', () => post({ type: 'openSettings' })),
-				actionButton('运行诊断', '生成兼容性诊断报告', () =>
-					post({ type: 'runCommand', command: 'diagnose' }),
-				),
-			);
-			break;
-		}
-		default: {
-			title.textContent = 'DSH 运行时未连接';
-			body.textContent = '点击下方按钮启动 DSH（ACP 子进程），或先检查设置。';
-			actions.append(
-				actionButton('启动运行时', '启动 DSH 运行时', () => post({ type: 'restartRuntime' })),
-				actionButton('打开设置', '打开 DeepSeek Harness 设置', () => post({ type: 'openSettings' })),
-				actionButton('运行诊断', '生成兼容性诊断报告', () =>
-					post({ type: 'runCommand', command: 'diagnose' }),
-				),
-			);
-			break;
-		}
+		empty.append(recentBox);
 	}
-
-	empty.append(title, body);
-	if (actions.childElementCount > 0) empty.append(actions);
 }
 
-const SEVERITY_LABELS: Record<Finding['severity'], string> = {
-	error: '错误',
-	warning: '警告',
-	info: '提示',
-};
+// ---------------------------------------------------------------------------
+// findings：可折叠 + severity 筛选 + 单条修复
+// ---------------------------------------------------------------------------
+
+const FINDING_FILTERS: readonly FindingFilter[] = ['all', 'error', 'warning', 'info'];
 
 function renderFindings(): void {
 	const findings = state.ui.findings;
 	refs.findingsSection.hidden = findings.length === 0;
-	refs.findingsCount.textContent = findings.length > 0 ? `（${findings.length}）` : '';
+	const counts = severityCounts(findings);
+	refs.findingsCount.textContent = counts.total > 0 ? `（${counts.total}）` : '';
+	refs.findingsToggle.setAttribute('aria-expanded', findingsCollapsed ? 'false' : 'true');
+	refs.findingsChevron.textContent = findingsCollapsed ? '▸' : '▾';
+	refs.findingsToggle.title = findingsCollapsed ? '展开审查结果' : '折叠审查结果';
+	refs.findingsFilters.hidden = findingsCollapsed;
+	refs.findingsList.hidden = findingsCollapsed;
+
+	refs.findingsFilters.replaceChildren();
+	for (const filter of FINDING_FILTERS) {
+		const count = filter === 'all' ? counts.total : counts[filter];
+		const filterName = filter === 'all' ? '全部' : SEVERITY_LABELS[filter];
+		const chip = button(findingFilterLabel(filter, count), `只看${filterName}`, 'filter-chip');
+		const active = findingsFilter === filter;
+		chip.classList.toggle('is-active', active);
+		chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+		chip.addEventListener('click', () => {
+			findingsFilter = filter;
+			renderFindings();
+		});
+		refs.findingsFilters.append(chip);
+	}
+
 	refs.findingsList.replaceChildren();
-	for (const finding of findings) {
-		const item = el('button', 'finding');
-		item.type = 'button';
-		item.title = finding.detail ? `${finding.title}\n${finding.detail}` : finding.title;
-		const icon = el('span', `finding-icon finding-${finding.severity}`, SEVERITY_LABELS[finding.severity] ?? '');
-		const title = el('span', 'finding-title', finding.title);
+	const visible = filterFindings(findings, findingsFilter);
+	if (visible.length === 0) {
+		refs.findingsList.append(el('div', 'findings-empty', '该严重级别暂无发现'));
+		return;
+	}
+	for (const finding of visible) {
+		const row = el('div', 'finding');
+		const main = el('button', 'finding-main');
+		main.type = 'button';
+		main.title = finding.detail ? `${finding.title}\n${finding.detail}` : finding.title;
+		const severity = el(
+			'span',
+			`finding-severity finding-${finding.severity}`,
+			SEVERITY_LABELS[finding.severity] ?? finding.severity,
+		);
 		const end = finding.endLine && finding.endLine !== finding.line ? `-${finding.endLine}` : '';
 		const location = el('span', 'finding-location', `${finding.file}:${finding.line}${end}`);
-		item.append(icon, title, location);
-		item.addEventListener('click', () => {
+		main.append(severity, el('span', 'finding-title', finding.title), location);
+		main.addEventListener('click', () => {
 			post({ type: 'openFile', path: finding.file, line: finding.line });
 		});
-		refs.findingsList.append(item);
+		const fix = button('修复', '让 DSH 修复这条发现', 'finding-fix');
+		fix.addEventListener('click', () => {
+			post({ type: 'fixFinding', finding });
+		});
+		row.append(main, fix);
+		refs.findingsList.append(row);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 模型/推理 select、上下文 chips、自动上下文 chip
+// ---------------------------------------------------------------------------
 
 function optionElement(value: ConfigOptionValue, current: string): HTMLOptionElement {
 	const option = el('option', undefined, value.name);
@@ -926,130 +1115,87 @@ function renderAutoContext(): void {
 	bar.append(toggle);
 }
 
+// ---------------------------------------------------------------------------
+// 输入 / 发送
+// ---------------------------------------------------------------------------
+
 function canSend(): boolean {
-	return refs.input.value.trim().length > 0 && state.ui.runtime.phase === 'ready';
+	return refs.input.value.trim().length > 0;
 }
 
 function updateSendButton(): void {
 	const busy = state.ui.busy;
-	refs.btnSend.textContent = busy ? '停止' : '发送';
+	refs.btnSend.textContent = busy ? '■' : '➤';
 	refs.btnSend.classList.toggle('is-stop', busy);
 	refs.btnSend.disabled = !busy && !canSend();
-	refs.btnSend.title = busy ? '停止当前回复' : '发送（Enter）';
+	refs.btnSend.title = busy ? '停止当前回复（Esc）' : '发送（Enter）';
 	refs.btnSend.setAttribute('aria-label', refs.btnSend.title);
 }
 
+// ---------------------------------------------------------------------------
+// 头部状态 / 菜单 / 历史
+// ---------------------------------------------------------------------------
+
 function renderStatus(): void {
-	const { runtime, busy, session, usage } = state.ui;
-	refs.statusDot.className = `status-dot status-dot-${runtime.phase}${busy ? ' is-busy' : ''}`;
-	refs.statusDot.title = runtime.error ?? '';
-	refs.statusText.textContent =
-		runtime.phase === 'ready'
+	const { runtime, busy, session, usage, configOptions } = state.ui;
+	const phase = runtime.phase;
+	refs.statusDot.className = `status-dot status-dot-${phase}${busy ? ' is-busy' : ''}`;
+	const title = headerTitle(session?.title, phase, busy);
+	refs.sessionTitle.textContent = title;
+	refs.sessionTitle.title = session?.title || session?.sessionId || title;
+
+	const detail: string[] = [];
+	detail.push(
+		phase === 'ready'
 			? busy
-				? '已连接 · 处理中…'
+				? '已连接 · 处理中'
 				: '已连接'
-			: runtime.phase === 'starting'
-				? '正在启动…'
-				: runtime.phase === 'error'
-					? '连接失败'
-					: '未连接';
+			: phase === 'starting'
+				? '正在启动 DSH 运行时'
+				: phase === 'error'
+					? '运行连接失败'
+					: '未连接',
+	);
+	if (runtime.dshVersion) detail.push(`DSH ${runtime.dshVersion}`);
+	if (runtime.protocolVersion !== undefined) detail.push(`ACP v${runtime.protocolVersion}`);
+	if (session) detail.push(session.title || session.sessionId);
+	const usageText = formatUsageText(usage);
+	if (usageText) detail.push(usageText);
+	if (runtime.error) detail.push(runtime.error);
+	refs.statusDot.title = detail.join('\n');
+	refs.statusDot.setAttribute('aria-label', detail[0]);
 
-	const parts: string[] = [];
-	if (runtime.dshVersion) parts.push(`DSH ${runtime.dshVersion}`);
-	if (runtime.protocolVersion !== undefined) parts.push(`ACP v${runtime.protocolVersion}`);
-	if (session) parts.push(shorten(session.title || session.sessionId, 24));
-	const usageText = usage ? formatUsage(usage) : '';
-	if (usageText) parts.push(usageText);
-	refs.statusMeta.textContent = parts.join(' · ');
-	refs.statusMeta.hidden = parts.length === 0;
-
-	refs.btnNew.disabled = runtime.phase === 'starting';
-	refs.btnRestart.disabled = runtime.phase === 'starting';
+	const modelLabel = currentConfigLabel(findConfigOption(configOptions, 'model'));
+	if (modelLabel) {
+		refs.modelPill.hidden = false;
+		refs.modelPill.textContent = modelLabel;
+		refs.modelPill.title = `当前模型：${modelLabel}`;
+	} else {
+		refs.modelPill.hidden = true;
+		refs.modelPill.textContent = '';
+		refs.modelPill.title = '';
+	}
 	updateSendButton();
 }
 
-function renderPermission(): void {
-	const request = state.permissionQueue[0];
-	refs.permission.hidden = !request;
-	refs.permissionTitle.textContent = '';
-	refs.permissionMeta.textContent = '';
-	refs.permissionBody.replaceChildren();
-	refs.permissionActions.replaceChildren();
-	if (!request) return;
-
-	refs.permissionTitle.textContent = request.title || '工具需要你的批准';
-	const metaParts: string[] = [];
-	if (request.toolKind) metaParts.push(`工具：${request.toolKind}`);
-	if (request.locations.length > 0) {
-		const preview = request.locations
-			.slice(0, 3)
-			.map((location) => (location.line ? `${location.path}:${location.line}` : location.path))
-			.join('、');
-		metaParts.push(`位置：${preview}`);
-	}
-	refs.permissionMeta.textContent = metaParts.join(' · ');
-
-	if (request.command) {
-		refs.permissionBody.append(el('pre', 'permission-command', request.command));
-	}
-	if (request.locations.length > 0) {
-		const locationRow = el('div', 'permission-locations');
-		for (const location of request.locations.slice(0, 5)) {
-			const label = location.line ? `${location.path}:${location.line}` : location.path;
-			const link = button(label, `打开 ${location.path}`);
-			link.className = 'link-button';
-			link.addEventListener('click', () => {
-				post({ type: 'openFile', path: location.path, line: location.line });
-			});
-			locationRow.append(link);
-		}
-		refs.permissionBody.append(locationRow);
-	}
-
-	const allowOptions = request.options.filter(
-		(option: PermissionOptionInfo) => option.kind.startsWith('allow'),
-	);
-	const rejectOptions = request.options.filter(
-		(option: PermissionOptionInfo) => !option.kind.startsWith('allow'),
-	);
-	const respond = (optionId?: string): void => {
-		post({ type: 'permissionResponse', requestId: request.id, optionId });
-		state.permissionQueue = state.permissionQueue.filter((item) => item.id !== request.id);
-		renderPermission();
-	};
-
-	const once = allowOptions.find((option) => option.kind === 'allow_once') ?? allowOptions[0];
-	const always = allowOptions.find((option) => option.kind === 'allow_always');
-	if (once) {
-		refs.permissionActions.append(
-			actionButton(once.name || '允许', once.name || '允许本次操作', () => respond(once.optionId), 'primary-button'),
-		);
-	}
-	if (always && always !== once) {
-		refs.permissionActions.append(
-			actionButton(always.name || '始终允许', always.name || '本次会话始终允许', () =>
-				respond(always.optionId),
-			),
-		);
-	}
-	// 拒绝/取消按协议回传缺省 optionId（扩展侧映射为 cancelled）。
-	refs.permissionActions.append(actionButton('拒绝', '拒绝本次操作', () => respond(undefined), 'danger-button'));
-	if (allowOptions.length === 0) {
-		for (const option of rejectOptions) {
-			refs.permissionActions.append(
-				actionButton(option.name, option.name, () => respond(option.optionId)),
-			);
-		}
-	}
-
-	if (!refs.permission.hidden) refs.permission.scrollIntoView({ block: 'nearest' });
+function closeMenu(): void {
+	refs.menu.hidden = true;
+	refs.menuButton.setAttribute('aria-expanded', 'false');
 }
 
-function formatHistoryDate(value: string | undefined): string {
-	if (!value) return '';
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) return value;
-	return date.toLocaleString('zh-CN', { hour12: false });
+function toggleMenu(): void {
+	if (!refs.menu.hidden) {
+		closeMenu();
+		return;
+	}
+	refs.menu.hidden = false;
+	refs.menuButton.setAttribute('aria-expanded', 'true');
+}
+
+function formatHistoryMeta(info: { cwd: string; updatedAt?: string }): string {
+	const relative = formatRelativeTime(info.updatedAt);
+	const parts = [relative, info.cwd].filter((part) => part.length > 0);
+	return parts.join(' · ');
 }
 
 function renderHistoryPanel(): void {
@@ -1061,10 +1207,9 @@ function renderHistoryPanel(): void {
 		return;
 	}
 	for (const info of history) {
-		const item = button(info.title || info.sessionId, `恢复会话 ${info.sessionId}`, 'history-item');
-		const updated = formatHistoryDate(info.updatedAt);
-		const meta = el('span', 'history-meta', updated ? `${updated} · ${info.cwd}` : info.cwd);
-		item.append(meta);
+		const item = button('', `恢复会话 ${info.sessionId}`, 'history-item');
+		item.append(el('span', 'history-title', truncateTitle(info.title || info.sessionId, 40)));
+		item.append(el('span', 'history-meta', formatHistoryMeta(info)));
 		item.addEventListener('click', () => {
 			post({ type: 'resumeSession', sessionId: info.sessionId });
 			hideHistoryPanel();
@@ -1087,6 +1232,97 @@ function toggleHistoryPanel(): void {
 	renderHistoryPanel();
 	// 让扩展刷新历史（扩展可能同时弹出 QuickPick，两者都可选择会话）。
 	post({ type: 'runCommand', command: 'history' });
+}
+
+// ---------------------------------------------------------------------------
+// 权限卡片
+// ---------------------------------------------------------------------------
+
+function renderPermission(): void {
+	const request = state.permissionQueue[0];
+	refs.permission.hidden = !request;
+	refs.permissionTitle.textContent = '';
+	refs.permissionMeta.textContent = '';
+	refs.permissionBody.replaceChildren();
+	refs.permissionActions.replaceChildren();
+	if (!request) return;
+
+	refs.permissionTitle.textContent = request.title || '工具需要你的批准';
+	const metaParts: string[] = [];
+	if (request.toolKind) metaParts.push(`工具：${request.toolKind}`);
+	if (request.locations.length > 0) {
+		const preview = request.locations
+			.slice(0, 2)
+			.map((location) => (location.line ? `${location.path}:${location.line}` : location.path))
+			.join('、');
+		metaParts.push(`位置：${preview}`);
+	}
+	refs.permissionMeta.textContent = metaParts.join(' · ');
+
+	if (request.command) {
+		refs.permissionBody.append(el('pre', 'permission-command', request.command));
+	}
+	if (request.locations.length > 0) {
+		const locationRow = el('div', 'permission-locations');
+		for (const location of request.locations.slice(0, 5)) {
+			const label = location.line ? `${location.path}:${location.line}` : location.path;
+			const link = button(label, `打开 ${location.path}`, 'link-button');
+			link.addEventListener('click', () => {
+				post({ type: 'openFile', path: location.path, line: location.line });
+			});
+			locationRow.append(link);
+		}
+		refs.permissionBody.append(locationRow);
+	}
+
+	const allowOptions = request.options.filter(
+		(option: PermissionOptionInfo) => option.kind.startsWith('allow'),
+	);
+	const rejectOptions = request.options.filter(
+		(option: PermissionOptionInfo) => !option.kind.startsWith('allow'),
+	);
+	const respond = (optionId?: string): void => {
+		post({ type: 'permissionResponse', requestId: request.id, optionId });
+		state.permissionQueue = state.permissionQueue.filter((item) => item.id !== request.id);
+		renderPermission();
+	};
+
+	const once = allowOptions.find((option) => option.kind === 'allow_once') ?? allowOptions[0];
+	const always = allowOptions.find((option) => option.kind === 'allow_always');
+	// 主按钮：允许本次；次按钮：始终允许 / 拒绝。
+	if (once) {
+		refs.permissionActions.append(
+			actionButton(
+				once.name || '允许',
+				once.name || '允许本次操作',
+				() => respond(once.optionId),
+				'primary-button',
+			),
+		);
+	}
+	if (always && always !== once) {
+		refs.permissionActions.append(
+			actionButton(
+				always.name || '始终允许',
+				always.name || '本次会话始终允许',
+				() => respond(always.optionId),
+				'ghost-button',
+			),
+		);
+	}
+	// 拒绝/取消按协议回传缺省 optionId（扩展侧映射为 cancelled）。
+	refs.permissionActions.append(
+		actionButton('拒绝', '拒绝本次操作', () => respond(undefined), 'ghost-button permission-reject'),
+	);
+	if (allowOptions.length === 0) {
+		for (const option of rejectOptions) {
+			refs.permissionActions.append(
+				actionButton(option.name, option.name, () => respond(option.optionId), 'ghost-button'),
+			);
+		}
+	}
+
+	if (!refs.permission.hidden) refs.permission.scrollIntoView({ block: 'nearest' });
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,6 +1389,7 @@ function renderAll(): void {
 	renderPermission();
 	renderHistoryPanel();
 	updateSendButton();
+	renderJumpButton();
 	if (stick) scrollToBottom();
 }
 
@@ -1162,6 +1399,7 @@ function applyState(next: UiState): void {
 	if (previousSessionId !== state.ui.session?.sessionId) {
 		// 切换会话后旧的权限请求已失效。
 		state.permissionQueue = [];
+		pendingNewCount = 0;
 	}
 	renderAll();
 }
@@ -1171,9 +1409,10 @@ function applyAppend(entries: TranscriptEntry[] | undefined): void {
 	for (const entry of entries) {
 		if (!isTranscriptEntry(entry)) continue;
 		const index = state.ui.transcript.findIndex((item) => item.id === entry.id);
-		if (index >= 0) state.ui.transcript[index] = entry;
-		else state.ui.transcript.push(entry);
-		upsertEntry(entry);
+		const fresh = index < 0;
+		if (fresh) state.ui.transcript.push(entry);
+		else state.ui.transcript[index] = entry;
+		upsertEntry(entry, fresh);
 	}
 	renderEmptyState();
 }
@@ -1232,10 +1471,12 @@ function handleMessage(raw: unknown): void {
 		case 'history':
 			state.ui.history = Array.isArray(message.history) ? message.history : [];
 			renderHistoryPanel();
+			renderEmptyState();
 			return;
 		case 'configOptions':
 			state.ui.configOptions = Array.isArray(message.configOptions) ? message.configOptions : [];
 			renderConfigOptions();
+			renderStatus();
 			return;
 		case 'contextRefs':
 			state.draftRefs = normalizeRefs(message.refs);
@@ -1277,11 +1518,14 @@ function autoSizeInput(): void {
 }
 
 function sendDraft(): void {
-	if (state.ui.busy) return;
 	const text = refs.input.value.trim();
 	if (text.length === 0) {
 		refs.input.focus();
 		return;
+	}
+	// 运行时未就绪也允许发送：扩展侧会先 bootstrap 再发 prompt。
+	if (state.ui.runtime.phase !== 'ready') {
+		showToast('info', '正在启动 DSH 运行时，消息会在就绪后自动发送。');
 	}
 	const refsPayload = state.draftRefs.length > 0 ? [...state.draftRefs] : undefined;
 	post({ type: 'send', text, refs: refsPayload });
@@ -1291,19 +1535,51 @@ function sendDraft(): void {
 	autoSizeInput();
 }
 
+function menuItem(label: string, title: string, run: () => void): HTMLButtonElement {
+	const item = button(label, title, 'menu-item');
+	item.setAttribute('role', 'menuitem');
+	item.addEventListener('click', (event: MouseEvent) => {
+		// 阻止冒泡到 document：否则「会话历史」打开后会被外部点击逻辑立刻关掉。
+		event.stopPropagation();
+		closeMenu();
+		run();
+	});
+	return item;
+}
+
 function wireUi(): void {
-	refs.btnNew.addEventListener('click', () => post({ type: 'newSession' }));
-	refs.btnHistory.addEventListener('click', () => toggleHistoryPanel());
-	refs.btnRestart.addEventListener('click', () => post({ type: 'restartRuntime' }));
-	refs.btnSettings.addEventListener('click', () => post({ type: 'openSettings' }));
+	const menuItems: [string, string, () => void][] = [
+		['新建会话', '新建一个 DSH 会话', () => post({ type: 'newSession' })],
+		['会话历史', '查看并恢复历史会话', () => toggleHistoryPanel()],
+		['本轮改动', '查看本轮改动 diff', () => post({ type: 'runCommand', command: 'showTurnChanges' })],
+		['兼容性诊断', '生成兼容性诊断报告', () => post({ type: 'runCommand', command: 'diagnose' })],
+		['重启运行时', '重启 DSH 运行时', () => post({ type: 'restartRuntime' })],
+		['打开设置', '打开 DeepSeek Harness 设置', () => post({ type: 'openSettings' })],
+	];
+	for (const [label, title, run] of menuItems) refs.menu.append(menuItem(label, title, run));
+
+	refs.menuButton.addEventListener('click', (event: MouseEvent) => {
+		event.stopPropagation();
+		toggleMenu();
+	});
 	refs.btnPickContext.addEventListener('click', () => post({ type: 'pickContext' }));
 	refs.btnFindingsFix.addEventListener('click', () => post({ type: 'runCommand', command: 'fixFindings' }));
 	refs.btnFindingsClear.addEventListener('click', () => post({ type: 'clearFindings' }));
+	refs.findingsToggle.addEventListener('click', () => {
+		findingsCollapsed = !findingsCollapsed;
+		renderFindings();
+	});
+	refs.jumpButton.addEventListener('click', jumpToBottom);
 	refs.btnSend.addEventListener('click', () => {
 		if (state.ui.busy) post({ type: 'cancel' });
 		else sendDraft();
 	});
 	refs.bannerClose.addEventListener('click', hideBanner);
+
+	refs.scroll.addEventListener('scroll', () => {
+		if (isNearBottom()) pendingNewCount = 0;
+		renderJumpButton();
+	});
 
 	refs.input.addEventListener('keydown', (event: KeyboardEvent) => {
 		if (event.key !== 'Enter' || event.shiftKey) return;
@@ -1321,16 +1597,27 @@ function wireUi(): void {
 	refs.modelSelect.addEventListener('change', () => handleConfigChange(refs.modelSelect));
 	refs.reasoningSelect.addEventListener('change', () => handleConfigChange(refs.reasoningSelect));
 
-	// 点击面板外/按 Esc 关闭历史下拉。
+	// 点击面板外关闭菜单/历史下拉。
 	document.addEventListener('click', (event: MouseEvent) => {
-		if (refs.historyPanel.hidden) return;
 		const target = event.target as Node | null;
 		if (!target) return;
-		if (refs.historyPanel.contains(target) || refs.btnHistory.contains(target)) return;
-		hideHistoryPanel();
+		if (
+			!refs.menu.hidden &&
+			!refs.menu.contains(target) &&
+			!refs.menuButton.contains(target)
+		) {
+			closeMenu();
+		}
+		if (!refs.historyPanel.hidden && !refs.historyPanel.contains(target)) {
+			hideHistoryPanel();
+		}
 	});
 	window.addEventListener('keydown', (event: KeyboardEvent) => {
 		if (event.key !== 'Escape') return;
+		if (!refs.menu.hidden) {
+			closeMenu();
+			return;
+		}
 		if (!refs.historyPanel.hidden) {
 			hideHistoryPanel();
 			return;

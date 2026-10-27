@@ -175,6 +175,7 @@ function makeVscode() {
 				registeredProviders.set(id, { provider, options });
 				return { dispose: () => registeredProviders.delete(id) };
 			},
+			registerUriHandler: () => ({ dispose: () => undefined }),
 			showInformationMessage: async (...args) => {
 				messages.push({ kind: 'info', text: String(args[0]) });
 				return undefined;
@@ -212,7 +213,9 @@ function makeVscode() {
 				clear: () => undefined,
 				dispose: () => undefined,
 			}),
+			registerCodeActionsProvider: () => ({ dispose: () => undefined }),
 		},
+		CodeActionKind: { QuickFix: { value: 'quickfix' } },
 		env: {
 			clipboard: {
 				writeText: async (text) => {

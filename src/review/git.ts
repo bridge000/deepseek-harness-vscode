@@ -65,6 +65,16 @@ export interface GitClient {
 	logOneline(cwd: string, count: number): Promise<GitLogEntry[]>;
 	/** Content of `path` at HEAD; `undefined` for new files / not-a-repo. */
 	showFileAtHead(cwd: string, path: string): Promise<string | undefined>;
+	/**
+	 * Revision of a working-tree snapshot created with `git stash create`, or
+	 * `undefined` when the working tree is clean or git fails. The returned
+	 * object is dangling on purpose: it is never added to the stash list.
+	 */
+	stashCreate(cwd: string): Promise<string | undefined>;
+	/** Content of `path` at `revision` (`HEAD` or a 4-40 char sha); `undefined` when absent. */
+	showAtRevision(cwd: string, revision: string, path: string): Promise<string | undefined>;
+	/** Whether the HEAD commit contains `path`. */
+	headExists(cwd: string, path: string): Promise<boolean>;
 }
 
 function errorMessage(error: unknown): string {
@@ -235,6 +245,26 @@ export function normalizeRepoPath(filePath: string): string {
 }
 
 /**
+ * Reject paths that could be read as a git option (`-p`) or escape the
+ * repository root. Defence in depth: the shell is already disabled.
+ */
+function isSafeRepoPath(filePath: string): boolean {
+	const normalized = normalizeRepoPath(filePath);
+	return (
+		Boolean(normalized) &&
+		!normalized.startsWith('-') &&
+		!normalized.startsWith('/') &&
+		!normalized.includes('\0') &&
+		!normalized.split('/').includes('..')
+	);
+}
+
+/** Accept only `HEAD` or a 4-40 char hex object id as a revision. */
+function isSafeRevision(revision: string): boolean {
+	return /^(HEAD|[0-9a-f]{4,40})$/i.test(revision);
+}
+
+/**
  * Create a git client bound to `runner`. Production code uses the default
  * runner; tests inject a fake one so parsing/truncation never needs real git.
  */
@@ -298,6 +328,27 @@ export function createGitClient(runner: GitRunner = defaultGitRunner): GitClient
 			const result = await run(['show', `HEAD:${normalized}`], cwd);
 			return result.code === 0 ? result.stdout : undefined;
 		},
+
+		async stashCreate(cwd) {
+			if (!cwd) return undefined;
+			// `git stash create` prints nothing (exit 0) when the work tree is clean.
+			const result = await run(['stash', 'create'], cwd);
+			if (result.code !== 0) return undefined;
+			const sha = result.stdout.trim();
+			return /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : undefined;
+		},
+
+		async showAtRevision(cwd, revision, filePath) {
+			if (!cwd || !isSafeRevision(revision) || !isSafeRepoPath(filePath)) return undefined;
+			const result = await run(['show', `${revision}:${normalizeRepoPath(filePath)}`], cwd);
+			return result.code === 0 ? result.stdout : undefined;
+		},
+
+		async headExists(cwd, filePath) {
+			if (!cwd || !isSafeRepoPath(filePath)) return false;
+			const result = await run(['cat-file', '-e', `HEAD:${normalizeRepoPath(filePath)}`], cwd);
+			return result.code === 0;
+		},
 	};
 }
 
@@ -333,4 +384,16 @@ export function logOneline(cwd: string, count: number): Promise<GitLogEntry[]> {
 
 export function showFileAtHead(cwd: string, filePath: string): Promise<string | undefined> {
 	return defaultClient.showFileAtHead(cwd, filePath);
+}
+
+export function stashCreate(cwd: string): Promise<string | undefined> {
+	return defaultClient.stashCreate(cwd);
+}
+
+export function showAtRevision(cwd: string, revision: string, filePath: string): Promise<string | undefined> {
+	return defaultClient.showAtRevision(cwd, revision, filePath);
+}
+
+export function headExists(cwd: string, filePath: string): Promise<boolean> {
+	return defaultClient.headExists(cwd, filePath);
 }

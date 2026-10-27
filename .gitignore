@@ -7,4 +7,7 @@ coverage/
 *.log
 screenshots/
 *.png
+!docs/images/*.png
+!media/*.png
+HANDOFF.local.md
 

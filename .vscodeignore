@@ -7,6 +7,13 @@ src/**
 tsconfig.json
 package-lock.json
 .gitignore
+.gitattributes
+.editorconfig
+HANDOFF.local.md
+CONTRIBUTING.md
+SECURITY.md
+PUBLISHING.md
+docs/**/*.md
 dist/compat.cjs
 *.ts
 *.map

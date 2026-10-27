@@ -16,6 +16,17 @@ export interface ReviewInput {
 export type DiffKind = 'working' | 'staged' | 'commit';
 export type ReviewKind = 'review' | 'explain';
 
+/** Outcome of reverting the latest agent turn. */
+export interface RevertResult {
+	ok: boolean;
+	/** Repo-relative paths that were restored/deleted. */
+	reverted: string[];
+	/** Paths intentionally left untouched, with a user-facing reason. */
+	skipped: Array<{ path: string; reason: string }>;
+	/** Set when the whole operation was refused. */
+	error?: string;
+}
+
 export interface ReviewService {
 	/** Whether the workspace root is inside a git repository. */
 	isGit(): Promise<boolean>;
@@ -34,6 +45,10 @@ export interface ReviewService {
 	endChanges(): Promise<string[]>;
 	/** Native diff view for files changed in the last turn. */
 	showChanges(files: string[]): Promise<void>;
+	/** Whether the latest turn can be reverted (git repo + snapshot captured). */
+	canRevert(): boolean;
+	/** Restore/delete the files changed by the latest turn (hash-guarded). */
+	revertLastTurn(): Promise<RevertResult>;
 }
 
 export interface ReviewServiceDeps {

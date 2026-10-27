@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in DeepSeek Harness for VS Code is broken
+title: '[bug] '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please remove API keys, personal paths, and other sensitive data before posting logs.
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      description: 'Extensions view → DeepSeek Harness, or `code --list-extensions --show-versions`'
+      placeholder: '0.3.0'
+    validations:
+      required: true
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version
+      description: '`dsh --version` or DeepSeek Harness desktop About dialog'
+      placeholder: '0.2.1-rc.3'
+    validations:
+      required: true
+  - type: input
+    id: os-vscode
+    attributes:
+      label: OS and VS Code version
+      placeholder: 'Windows 11 26100, VS Code 1.143.1'
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a workspace
+        2. Run "DeepSeek Harness: 审查当前文件"
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / logs
+      description: 'Output panel → DeepSeek Harness, or "DeepSeek Harness: 兼容性诊断"'
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed API keys/personal data from logs
+          required: true
+        - label: I ran "DeepSeek Harness: 兼容性诊断" and attached/copied the report when relevant

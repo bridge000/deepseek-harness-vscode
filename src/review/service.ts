@@ -351,5 +351,11 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
 		showChanges(files) {
 			return tracker.show(files);
 		},
+		canRevert() {
+			return tracker.canRevert();
+		},
+		revertLastTurn() {
+			return tracker.revertLastTurn();
+		},
 	};
 }

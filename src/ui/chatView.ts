@@ -250,6 +250,13 @@ class ChatViewProviderImpl implements ChatViewProvider {
 				controller.runCommand(message.command);
 				return;
 			}
+			case 'fixFinding': {
+				const finding = message.finding;
+				if (typeof finding !== 'object' || finding === null) return;
+				if (typeof finding.file !== 'string' || typeof finding.line !== 'number') return;
+				await controller.fixFinding(finding);
+				return;
+			}
 			case 'clearFindings':
 				controller.clearFindings();
 				return;

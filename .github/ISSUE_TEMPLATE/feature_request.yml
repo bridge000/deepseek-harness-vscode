@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement for DeepSeek Harness for VS Code
+title: '[feature] '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do, and what is missing or awkward today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - UI / sidebar
+        - Chat / sessions
+        - Code review / diagnostics
+        - Quick Fix
+        - Undo turn
+        - Auto context
+        - Model handling
+        - DSH compatibility
+        - Documentation
+        - Other

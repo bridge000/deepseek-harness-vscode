@@ -23,6 +23,8 @@ export interface ChatController {
 	permissionResponse(requestId: string, optionId?: string): void;
 	openFile(path: string, line?: number): void;
 	runCommand(command: CommandId): void;
+	/** Fix exactly one reviewed finding (from the sidebar list). */
+	fixFinding(finding: Finding): Promise<void>;
 	clearFindings(): void;
 	restartRuntime(): Promise<void>;
 	openSettings(): void;
