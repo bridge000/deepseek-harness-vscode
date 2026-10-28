@@ -21,7 +21,7 @@ source checkout, and nothing has been published yet.
 Create an empty repository on github.com (no README/license), then from the repo root:
 
 ```powershell
-git remote add origin https://github.com/<owner>/deepseek-harness-vscode.git
+git remote add origin https://github.com/bridge000/deepseek-harness-vscode.git
 git push -u origin main
 git push origin v0.9.0
 ```
@@ -36,9 +36,9 @@ code --install-extension deepseek-harness-v0.9.0.vsix
 Then update the placeholder metadata in `package.json` (and `README*.md` install
 commands if the extension id changes):
 
-- `repository.url`: `https://github.com/<owner>/deepseek-harness-vscode.git`
-- `homepage`: `https://github.com/<owner>/deepseek-harness-vscode#readme`
-- `bugs.url`: `https://github.com/<owner>/deepseek-harness-vscode/issues`
+- `repository.url`: `https://github.com/bridge000/deepseek-harness-vscode.git`
+- `homepage`: `https://github.com/bridge000/deepseek-harness-vscode#readme`
+- `bugs.url`: `https://github.com/bridge000/deepseek-harness-vscode/issues`
 - `publisher` / `author`: your Marketplace publisher id / GitHub handle
 
 ## 2. VS Code Marketplace (yes, publishing is open to anyone)

@@ -8,11 +8,11 @@
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xliang/deepseek-harness-vscode.git"
+    "url": "https://github.com/bridge000/deepseek-harness-vscode.git"
   },
-  "homepage": "https://github.com/xliang/deepseek-harness-vscode#readme",
+  "homepage": "https://github.com/bridge000/deepseek-harness-vscode#readme",
   "bugs": {
-    "url": "https://github.com/xliang/deepseek-harness-vscode/issues"
+    "url": "https://github.com/bridge000/deepseek-harness-vscode/issues"
   },
   "license": "MIT",
   "engines": {
