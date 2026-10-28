@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 
-export type PermissionMode = 'workspace-write' | 'read-only' | 'danger-full-access';
+import type { PermissionMode } from './types';
+
+export type { PermissionMode } from './types';
 export type AutoApproveMode = 'ask' | 'all';
 export type AutoContextMode = 'selection-first' | 'file' | 'off';
 
@@ -19,6 +21,10 @@ export interface ExtensionConfig {
 	showChangesNotice: boolean;
 	checkCompatOnVersionChange: boolean;
 	compatAutoRepair: boolean;
+	/** Sidebar font scale (0.8–1.8, 1 = follow the VS Code font size). */
+	fontScale: number;
+	/** Start the DSH runtime in the background as soon as the extension activates. */
+	autoStartRuntime: boolean;
 	/** Resolved working directory for the ACP process and review paths. */
 	workspaceRoot: string;
 }
@@ -57,6 +63,8 @@ export function readConfig(): ExtensionConfig {
 	const hideLegacyModels = config.get<boolean>('hideLegacyModels', true);
 	const maxReviewChars = Math.max(2000, Math.floor(config.get<number>('maxReviewChars', 60000)));
 	const saveTranscriptLimit = Math.max(1, Math.floor(config.get<number>('saveTranscriptLimit', 50)));
+	const rawFontScale = Number(config.get<number>('fontScale', 1));
+	const fontScale = Number.isFinite(rawFontScale) ? Math.min(1.8, Math.max(0.8, rawFontScale)) : 1;
 	return {
 		executable,
 		profile,
@@ -72,6 +80,8 @@ export function readConfig(): ExtensionConfig {
 		showChangesNotice: config.get<boolean>('showChangesNotice', true),
 		checkCompatOnVersionChange: config.get<boolean>('checkCompatOnVersionChange', true),
 		compatAutoRepair: config.get<boolean>('compat.autoRepair', true),
+		fontScale,
+		autoStartRuntime: config.get<boolean>('autoStartRuntime', true) !== false,
 		workspaceRoot: root?.fsPath ?? '',
 	};
 }

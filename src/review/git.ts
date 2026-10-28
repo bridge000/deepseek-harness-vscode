@@ -61,6 +61,8 @@ export interface GitClient {
 	repoPrefix(cwd: string): Promise<string>;
 	statusPorcelain(cwd: string): Promise<Map<string, GitStatusEntry>>;
 	diff(cwd: string, kind: 'working' | 'staged', maxChars: number): Promise<GitDiffResult>;
+	/** Diff limited to workspace-relative pathspecs; `HEAD` base, falling back to the index/worktree. */
+	diffPaths(cwd: string, paths: readonly string[], maxChars: number): Promise<GitDiffResult>;
 	showCommit(cwd: string, sha: string, maxChars: number): Promise<GitDiffResult>;
 	logOneline(cwd: string, count: number): Promise<GitLogEntry[]>;
 	/** Content of `path` at HEAD; `undefined` for new files / not-a-repo. */
@@ -259,6 +261,23 @@ function isSafeRepoPath(filePath: string): boolean {
 	);
 }
 
+/**
+ * Normalize + de-duplicate user-provided paths into git pathspecs, dropping
+ * anything that could be read as an option or escape the repository root.
+ */
+function toSafePathspecs(paths: readonly string[]): string[] {
+	const specs: string[] = [];
+	const seen = new Set<string>();
+	for (const rawPath of paths) {
+		if (!isSafeRepoPath(rawPath)) continue;
+		const normalized = normalizeRepoPath(rawPath);
+		if (seen.has(normalized)) continue;
+		seen.add(normalized);
+		specs.push(normalized);
+	}
+	return specs;
+}
+
 /** Accept only `HEAD` or a 4-40 char hex object id as a revision. */
 function isSafeRevision(revision: string): boolean {
 	return /^(HEAD|[0-9a-f]{4,40})$/i.test(revision);
@@ -302,6 +321,20 @@ export function createGitClient(runner: GitRunner = defaultGitRunner): GitClient
 			const base = ['--no-color', '--no-ext-diff', '--unified=3'];
 			const args = kind === 'staged' ? ['diff', '--cached', ...base] : ['diff', ...base];
 			const result = await run(args, cwd);
+			return toDiffResult(result, maxChars);
+		},
+
+		async diffPaths(cwd, paths, maxChars) {
+			const specs = toSafePathspecs(paths);
+			if (!cwd || specs.length === 0) return { text: '', files: [], truncated: false };
+			const base = ['diff', '--no-color', '--no-ext-diff', '--unified=3'];
+			// HEAD is the review baseline ("this turn's changes"). A repository
+			// without commits has no HEAD yet, so fall back to diffing the
+			// index/worktree rather than dropping the whole review.
+			let result = await run([...base, 'HEAD', '--', ...specs], cwd);
+			if (result.code !== 0) {
+				result = await run([...base, '--', ...specs], cwd);
+			}
 			return toDiffResult(result, maxChars);
 		},
 
@@ -372,6 +405,10 @@ export function statusPorcelain(cwd: string): Promise<Map<string, GitStatusEntry
 
 export function diff(cwd: string, kind: 'working' | 'staged', maxChars: number): Promise<GitDiffResult> {
 	return defaultClient.diff(cwd, kind, maxChars);
+}
+
+export function diffPaths(cwd: string, paths: readonly string[], maxChars: number): Promise<GitDiffResult> {
+	return defaultClient.diffPaths(cwd, paths, maxChars);
 }
 
 export function showCommit(cwd: string, sha: string, maxChars: number): Promise<GitDiffResult> {

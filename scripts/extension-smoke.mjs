@@ -248,6 +248,7 @@ function makeVscode() {
 			onDidChangeTextDocument: () => ({ dispose: () => undefined }),
 			onDidOpenTextDocument: () => ({ dispose: () => undefined }),
 			onDidChangeWorkspaceFolders: () => ({ dispose: () => undefined }),
+			onDidChangeConfiguration: () => ({ dispose: () => undefined }),
 		},
 	};
 }
@@ -270,7 +271,7 @@ const context = {
 	subscriptions: [],
 	extensionUri: Uri.file(projectRoot),
 	extensionPath: projectRoot,
-	extension: { packageJSON: { version: '0.2.0' } },
+	extension: { packageJSON: { version: '0.9.0' } },
 	globalStorageUri: Uri.file(storageDir),
 	storageUri: Uri.file(storageDir),
 	globalState: {
@@ -364,16 +365,81 @@ async function main() {
 
 	receiveFromWebview({ type: 'ready' });
 	await delay(200);
-	check(lastState()?.runtime?.phase === 'stopped', '初始状态为 stopped');
+	const bootPhase = lastState()?.runtime?.phase;
+	check(bootPhase === 'stopped' || bootPhase === 'starting', `激活后运行时状态：${bootPhase}（后台自动启动中）`);
 	check(view.webview.options?.enableScripts === true, 'webview 脚本已启用');
+	check(
+		lastState()?.mode === 'agent' &&
+			lastState()?.autoReview === false &&
+			lastState()?.permissionMode === (strictMode ? 'read-only' : 'workspace-write'),
+		`输入区默认状态：自动 / 审查关 / 权限=${strictMode ? 'read-only' : 'workspace-write'}`,
+	);
 
-	console.log('  … 打开侧边栏并启动真实 DSH ACP 运行时');
-	await commandHandlers.get('deepseekHarness.openChat')();
-	await waitFor(() => lastState()?.runtime?.phase === 'ready', 120000, '运行时 ready');
+	console.log('  … 后台自动启动：不调用 openChat，等运行时 ready');
+	await waitFor(() => lastState()?.runtime?.phase === 'ready', 120000, '后台自动启动到 ready');
+	check(true, '未打开聊天面板即自动拉起 DSH 运行时（autoStartRuntime）');
 	const state = lastState();
 	check(state.runtime.protocolVersion === 1, `ACP protocolVersion=${String(state.runtime.protocolVersion)}`);
 	check(typeof state.runtime.dshVersion === 'string' && state.runtime.dshVersion.length > 0, `DSH 版本=${state.runtime.dshVersion}`);
 	check(state.runtime.capabilities.sessionList === true, 'session/list 能力可用');
+	// 回归：后台自启/打开面板时预建会话，模型配置项无需先发消息就应就绪。
+	await waitFor(
+		() =>
+			(lastState()?.configOptions ?? []).some(
+				(option) => option.category === 'model' || option.id === 'model',
+			),
+		60000,
+		'后台预建会话后下发模型配置项',
+	);
+	check(true, '未发送消息前模型配置项已就绪（修复"刚启动时模型选项加载不出来"）');
+
+	console.log('  … 输入区模式与权限预设');
+	receiveFromWebview({ type: 'setMode', mode: 'plan' });
+	await delay(150);
+	check(lastState()?.mode === 'plan', '模式切换为「计划」');
+	check(
+		posted.some((message) => message.type === 'prefs' && message.mode === 'plan'),
+		'prefs 增量消息已推送到侧边栏',
+	);
+	receiveFromWebview({ type: 'setAutoReview', enabled: true });
+	await delay(150);
+	check(lastState()?.autoReview === true, '自动审查开关已开启');
+
+	receiveFromWebview({ type: 'setFontScale', value: 1.2 });
+	await delay(150);
+	check(lastState()?.fontScale === 1.2, '字号切换为 120%');
+	check(
+		posted.some((message) => message.type === 'prefs' && message.fontScale === 1.2),
+		'prefs 增量消息已推送字号变更',
+	);
+	receiveFromWebview({ type: 'setFontScale', value: 1 });
+	await delay(150);
+	check(lastState()?.fontScale === 1, '字号已复位为 100%');
+
+	// 运行时已 ready，切权限会真的重启 DSH 运行时并等待新进程就绪。
+	const initialPermission = strictMode ? 'read-only' : 'workspace-write';
+	await receiveFromWebview({ type: 'setPermissionMode', mode: 'read-only' });
+	check(lastState()?.permissionMode === 'read-only', '权限切换为「只读」');
+	await receiveFromWebview({ type: 'setPermissionMode', mode: 'danger-full-access' });
+	check(lastState()?.permissionMode === 'danger-full-access', '权限切换为「完全权限」');
+	check(
+		posted.some((message) => message.type === 'prefs' && message.permissionMode === 'danger-full-access'),
+		'prefs 增量消息已推送权限变更',
+	);
+	await receiveFromWebview({ type: 'setPermissionMode', mode: initialPermission });
+	check(lastState()?.permissionMode === initialPermission, `权限已复位为 ${initialPermission}`);
+
+	receiveFromWebview({ type: 'setMode', mode: 'agent' });
+	receiveFromWebview({ type: 'setAutoReview', enabled: false });
+	await delay(150);
+	check(
+		lastState()?.mode === 'agent' && lastState()?.autoReview === false,
+		'模式与自动审查已复位，后续流程不受影响',
+	);
+
+	console.log('  … 打开聊天面板（运行时由后台自启就绪）');
+	await commandHandlers.get('deepseekHarness.openChat')();
+	await waitFor(() => lastState()?.runtime?.phase === 'ready', 120000, '运行时 ready');
 
 	console.log('  … 自动上下文检查');
 	const autoContextMessage = posted.filter((message) => message.type === 'autoContext').pop();
@@ -437,6 +503,27 @@ async function main() {
 		check(fs.existsSync(target), '严格模式允许后文件已创建');
 		await waitFor(() => lastState()?.busy === false, 180000, '权限任务结束');
 	} else {
+		console.log('  … 排队插话：运行中提交自动排队，引导不打断当前回复');
+		const slow = receiveFromWebview({ type: 'send', text: '请只回复两个字：收到。' });
+		await waitFor(() => lastState()?.busy === true, 30000, '运行时进入 busy');
+		receiveFromWebview({ type: 'send', text: '排队消息：请只回复 OK。', pendingMode: 'queue' });
+		await waitFor(() => (lastState()?.pending ?? []).length === 1, 10000, '运行中发送进入排队');
+		const queued = lastState().pending[0];
+		check(queued?.mode === 'queue' && String(queued?.text).includes('排队消息'), '运行中发送自动进入排队队列');
+		receiveFromWebview({ type: 'pendingAction', id: queued.id, action: 'steer' });
+		await waitFor(() => lastState()?.pending?.[0]?.mode === 'steer', 10000, '排队消息转为引导');
+		const steered = lastState().pending[0];
+		check(steered?.mode === 'steer', '排队消息可一键转为引导');
+		receiveFromWebview({ type: 'pendingAction', id: steered.id, action: 'cancel' });
+		await waitFor(() => (lastState()?.pending ?? []).length === 0, 10000, '排队消息可取消');
+		check((lastState()?.pending ?? []).length === 0, '引导/排队消息可取消');
+		await slow;
+		await waitFor(() => lastState()?.busy === false, 180000, '排队测试的当前回复结束');
+		check(
+			!(lastState()?.transcript ?? []).some((entry) => entry.kind === 'user' && String(entry.text).includes('OK')),
+			'被取消的排队消息没有发送',
+		);
+
 		console.log('  … 切换推理强度');
 		const reasoning = afterTurn.configOptions.find((option) => option.category === 'thought_level' || option.id === 'reasoning_effort');
 		if (reasoning) {
@@ -461,7 +548,31 @@ async function main() {
 			reviewState.transcript.some((entry) => entry.kind === 'user' && String(entry.text).includes('审查')),
 			'审查请求出现在会话记录里',
 		);
+		const reviewUserEntries = reviewState.transcript.filter((entry) => entry.kind === 'user');
+		const reviewUserEntry = reviewUserEntries[reviewUserEntries.length - 1];
+		check(
+			reviewUserEntry !== undefined &&
+				String(reviewUserEntry.text).length < 200 &&
+				!String(reviewUserEntry.text).includes('资深代码审查员') &&
+				!String(reviewUserEntry.text).includes('输出格式'),
+			`审查提示词正文未进入用户气泡（气泡=${JSON.stringify(String(reviewUserEntry?.text ?? '')).slice(0, 80)}）`,
+		);
 	}
+
+	console.log('  … 新建会话：提示走 toast，不写对话流');
+	await commandHandlers.get('deepseekHarness.newSession')();
+	await delay(800);
+	check(
+		posted.some((message) => message.type === 'toast' && String(message.message).includes('已新建会话')),
+		'新建会话提示以 toast 推送',
+	);
+	const newSessionState = lastState();
+	check(
+		!newSessionState.transcript.some(
+			(entry) => entry.kind === 'notice' && String(entry.text).includes('已新建会话'),
+		),
+		'新建会话提示不再写入对话流（启动页不会被遮挡）',
+	);
 
 	console.log('  … 关闭扩展');
 	for (const subscription of context.subscriptions) {

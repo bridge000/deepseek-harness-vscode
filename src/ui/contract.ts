@@ -5,13 +5,16 @@
  */
 import type * as vscode from 'vscode';
 import type { ProbeResult } from '../acp/contracts';
-import type { ContextRef, Finding, RuntimeState, SessionInfo, UiState } from '../types';
+import type { ContextRef, Finding, PermissionMode, RuntimeState, SessionInfo, SessionMode, UiState } from '../types';
 import type { CommandId, ExtToWeb } from './protocol';
 
 /** Callbacks implemented by the extension controller and consumed by the view. */
 export interface ChatController {
 	getState(): UiState;
-	send(text: string, refs: ContextRef[]): Promise<void>;
+	/** Send one message; `pendingMode` queues/steers it while the agent is busy. */
+	send(text: string, refs?: ContextRef[], pendingMode?: 'queue' | 'steer'): Promise<void>;
+	/** Promote (`steer`) or drop (`cancel`) one queued interjection. */
+	pendingAction(id: string, action: 'steer' | 'cancel'): void;
 	cancel(): void;
 	newSession(): Promise<void>;
 	resumeSession(sessionId: string): Promise<void>;
@@ -20,6 +23,14 @@ export interface ChatController {
 	setConfig(configId: string, value: string): Promise<void>;
 	/** Enable/disable auto context for the following messages. */
 	setAutoContext(enabled: boolean): void;
+	/** Client-side collaboration mode (agent / plan / goal). */
+	setMode(mode: SessionMode): void;
+	/** Review the turn's changes automatically after every chat turn. */
+	setAutoReview(enabled: boolean): void;
+	/** Switch the effective permission preset; the runtime restarts and resumes. */
+	setPermissionMode(mode: PermissionMode): Promise<void>;
+	/** Persist and apply the sidebar font scale (0.8–1.8). */
+	setFontScale(value: number): Promise<void>;
 	permissionResponse(requestId: string, optionId?: string): void;
 	openFile(path: string, line?: number): void;
 	runCommand(command: CommandId): void;

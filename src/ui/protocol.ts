@@ -7,9 +7,11 @@ import type {
 	ConfigOption,
 	ContextRef,
 	Finding,
+	PermissionMode,
 	PermissionRequest,
 	RuntimeState,
 	SessionInfo,
+	SessionMode,
 	TranscriptEntry,
 	UiState,
 	UsageInfo,
@@ -46,12 +48,17 @@ export type ExtToWeb =
 	| { type: 'contextRefs'; refs: ContextRef[] }
 	| { type: 'autoContext'; info: AutoContextInfo }
 	| { type: 'runtime'; runtime: RuntimeState }
+	/** Lightweight echo of the composer preferences so switching one does not re-render everything. */
+	| { type: 'prefs'; mode: SessionMode; autoReview: boolean; permissionMode: PermissionMode; fontScale: number }
 	| { type: 'focusInput' };
+
+export type PendingMode = 'queue' | 'steer';
 
 export type WebviewToExt =
 	| { type: 'ready' }
-	| { type: 'send'; text: string; refs?: ContextRef[] }
+	| { type: 'send'; text: string; refs?: ContextRef[]; pendingMode?: PendingMode }
 	| { type: 'cancel' }
+	| { type: 'pendingAction'; id: string; action: 'steer' | 'cancel' }
 	| { type: 'permissionResponse'; requestId: string; optionId?: string }
 	| { type: 'newSession' }
 	| { type: 'resumeSession'; sessionId: string }
@@ -64,7 +71,11 @@ export type WebviewToExt =
 	| { type: 'restartRuntime' }
 	| { type: 'openSettings' }
 	| { type: 'copyDiagnostics' }
-	| { type: 'setAutoContext'; enabled: boolean };
+	| { type: 'setAutoContext'; enabled: boolean }
+	| { type: 'setMode'; mode: SessionMode }
+	| { type: 'setAutoReview'; enabled: boolean }
+	| { type: 'setPermissionMode'; mode: PermissionMode }
+	| { type: 'setFontScale'; value: number };
 
 export function isWebviewToExt(value: unknown): value is WebviewToExt {
 	if (typeof value !== 'object' || value === null) return false;
@@ -73,6 +84,7 @@ export function isWebviewToExt(value: unknown): value is WebviewToExt {
 		type === 'ready' ||
 		type === 'send' ||
 		type === 'cancel' ||
+		type === 'pendingAction' ||
 		type === 'permissionResponse' ||
 		type === 'newSession' ||
 		type === 'resumeSession' ||
@@ -85,8 +97,20 @@ export function isWebviewToExt(value: unknown): value is WebviewToExt {
 		type === 'restartRuntime' ||
 		type === 'openSettings' ||
 		type === 'copyDiagnostics' ||
-		type === 'setAutoContext'
+		type === 'setAutoContext' ||
+		type === 'setMode' ||
+		type === 'setAutoReview' ||
+		type === 'setPermissionMode' ||
+		type === 'setFontScale'
 	);
+}
+
+export function isSessionMode(value: unknown): value is SessionMode {
+	return value === 'agent' || value === 'plan' || value === 'goal';
+}
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+	return value === 'workspace-write' || value === 'read-only' || value === 'danger-full-access';
 }
 
 const COMMAND_IDS: readonly CommandId[] = [

@@ -2,9 +2,10 @@
   "name": "deepseek-harness",
   "displayName": "DeepSeek Harness",
   "description": "把 DeepSeek Harness 接入 VS Code 侧边栏：聊天 + 文件级代码审查 + Quick Fix（非官方社区扩展，ACP 自动化接口）",
-  "version": "0.3.0",
+  "version": "0.9.0",
   "publisher": "xliang",
   "author": "xliang",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/xliang/deepseek-harness-vscode.git"
@@ -193,11 +194,6 @@
           "command": "deepseekHarness.restartRuntime",
           "when": "view == deepseekHarness.chat",
           "group": "navigation@3"
-        },
-        {
-          "command": "deepseekHarness.clearFindings",
-          "when": "view == deepseekHarness.chat",
-          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -286,6 +282,18 @@
           ],
           "default": "ask",
           "markdownDescription": "`ask` 逐次弹窗批准；`all` 自动允许所有权限请求（危险）。"
+        },
+        "deepseekHarness.fontScale": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.8,
+          "maximum": 1.8,
+          "description": "侧边栏字体大小（字号缩放）：1 = 跟随 VS Code 字号，0.8–1.8 之间可调；也可在侧边栏右上角「⋯」菜单里实时调整。"
+        },
+        "deepseekHarness.autoStartRuntime": {
+          "type": "boolean",
+          "default": true,
+          "description": "扩展激活（打开 VS Code）时就在后台拉起 DSH 运行时，无需先打开侧边栏；关闭后仅在打开侧边栏时启动。"
         },
         "deepseekHarness.workspaceRootIndex": {
           "type": "number",

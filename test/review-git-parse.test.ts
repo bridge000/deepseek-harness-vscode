@@ -179,6 +179,64 @@ describe('createGitClient (injected runner)', () => {
 		expect(result).toEqual({ text: '', files: [], truncated: false });
 	});
 
+	it('diffPaths scopes the diff to the given pathspecs with a HEAD base', async () => {
+		const runner = fakeRunner(() => ({ code: 0, stdout: 'diff --git a/src/a.ts b/src/a.ts' }));
+		const result = await createGitClient(runner.runner).diffPaths('C:/ws', ['src/a.ts'], 10_000);
+		expect(runner.calls).toHaveLength(1);
+		expect(runner.calls[0]).toEqual({
+			args: ['diff', '--no-color', '--no-ext-diff', '--unified=3', 'HEAD', '--', 'src/a.ts'],
+			cwd: 'C:/ws',
+		});
+		expect(result.files).toEqual(['src/a.ts']);
+		expect(result.truncated).toBe(false);
+	});
+
+	it('diffPaths retries without HEAD when the repository has no commit yet', async () => {
+		const runner = fakeRunner((args) =>
+			args.includes('HEAD')
+				? { code: 128, stderr: 'fatal: bad revision HEAD' }
+				: { code: 0, stdout: 'diff --git a/src/a.ts b/src/a.ts' },
+		);
+		const result = await createGitClient(runner.runner).diffPaths('C:/ws', ['src/a.ts'], 10_000);
+		expect(runner.calls).toHaveLength(2);
+		expect(runner.calls[1].args).not.toContain('HEAD');
+		expect(runner.calls[1].args).toEqual([
+			'diff',
+			'--no-color',
+			'--no-ext-diff',
+			'--unified=3',
+			'--',
+			'src/a.ts',
+		]);
+		expect(result.files).toEqual(['src/a.ts']);
+	});
+
+	it('diffPaths drops unsafe paths and never spawns git when none remain', async () => {
+		const runner = fakeRunner(() => ({ code: 0, stdout: 'diff --git a/src/a.ts b/src/a.ts' }));
+		const client = createGitClient(runner.runner);
+
+		expect(await client.diffPaths('C:/ws', ['-x', '/etc/passwd', 'src/../evil.ts', ''], 1000)).toEqual({
+			text: '',
+			files: [],
+			truncated: false,
+		});
+		expect(runner.calls).toHaveLength(0);
+
+		// Mixed input keeps only the safe path; `../../x` and absolute paths are dropped.
+		await client.diffPaths('C:/ws', ['-x', 'src/a.ts', 'src/../b.ts', '..\\evil.ts', '/abs/c.ts'], 1000);
+		expect(runner.calls).toHaveLength(1);
+		expect(runner.calls[0].args.slice(-2)).toEqual(['--', 'src/a.ts']);
+	});
+
+	it('diffPaths degrades to an empty result when the fallback also fails', async () => {
+		const runner = fakeRunner(() => ({ code: 128, stderr: 'fatal' }));
+		expect(await createGitClient(runner.runner).diffPaths('C:/ws', ['src/a.ts'], 1000)).toEqual({
+			text: '',
+			files: [],
+			truncated: false,
+		});
+	});
+
 	it('swallows runner exceptions', async () => {
 		const runner: GitRunner = {
 			run: async () => {

@@ -18,7 +18,14 @@ import type {
 	TranscriptEntry,
 	UsageInfo,
 } from '../types';
-import type { DshRuntime, PromptOutcome, SessionEvent, SessionService, SessionServiceOptions } from '../acp/contracts';
+import type {
+	DshRuntime,
+	PromptDisplayOptions,
+	PromptOutcome,
+	SessionEvent,
+	SessionService,
+	SessionServiceOptions,
+} from '../acp/contracts';
 import { JsonRpcPeer, RpcError } from '../acp/jsonrpc';
 import type { DshRuntimeWithCapabilities } from '../acp/runtime';
 import {
@@ -37,7 +44,9 @@ import {
 	type AcpSetConfigOptionResult,
 	type AcpToolCall,
 	type ContentBlock,
+	type ContentImage,
 } from '../acp/protocol';
+import { refNameFromUri } from '../context/media';
 
 const MAX_DETAIL_CHARS = 2000;
 const MAX_COMMAND_CHARS = 400;
@@ -149,10 +158,18 @@ function normalizeUsage(raw: unknown): UsageInfo | undefined {
 	const pick = (key: string): number | undefined => (typeof record[key] === 'number' ? (record[key] as number) : undefined);
 	const inputTokens = pick('inputTokens') ?? pick('input_tokens');
 	const outputTokens = pick('outputTokens') ?? pick('output_tokens');
-	// DSH 的 usage_update 实测形状是 { used, size }（上下文窗口用量）。
+	// DSH 的 usage_update 实测形状是 { used, size }（used = 已用上下文，size = 窗口大小）。
 	const totalTokens = pick('totalTokens') ?? pick('total_tokens') ?? pick('used');
-	if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return undefined;
-	return { inputTokens, outputTokens, totalTokens };
+	const contextSize = pick('size') ?? pick('contextSize') ?? pick('context_size');
+	if (
+		inputTokens === undefined &&
+		outputTokens === undefined &&
+		totalTokens === undefined &&
+		contextSize === undefined
+	) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens, totalTokens, contextSize };
 }
 
 function normalizePermissionOptions(raw: unknown): PermissionOptionInfo[] {
@@ -199,6 +216,18 @@ function normalizeSessions(raw: unknown): SessionInfo[] {
 function collectRefs(blocks: readonly ContentBlock[]): ContextRef[] {
 	const refs: ContextRef[] = [];
 	for (const block of blocks) {
+		// 图片以 ACP image content block 发送：气泡里显示为图片 ref，而不是资源链接。
+		if (block.type === 'image') {
+			const image = block as ContentImage;
+			if (typeof image.uri !== 'string' || image.uri.length === 0) continue;
+			refs.push({
+				name: refNameFromUri(image.uri),
+				uri: image.uri,
+				kind: 'image',
+				mimeType: typeof image.mimeType === 'string' ? image.mimeType : undefined,
+			});
+			continue;
+		}
 		if (block.type !== 'resource_link') continue;
 		const link = block as { uri?: unknown; name?: unknown };
 		if (typeof link.uri !== 'string') continue;
@@ -217,15 +246,28 @@ function promptText(blocks: readonly ContentBlock[]): string {
 /** 侧边栏用户气泡只显示摘要：审查 prompt 可能带 60k 字符上下文，全量渲染会拖垮 webview。 */
 const USER_BUBBLE_CHARS = 600;
 
-function userEntryText(blocks: readonly ContentBlock[]): string {
-	const fullText = promptText(blocks);
-	if (fullText.length <= USER_BUBBLE_CHARS) return fullText;
-	return `${fullText.slice(0, USER_BUBBLE_CHARS)}…（已附带 ${fullText.length} 字符上下文）`;
+function fitUserBubble(text: string): string {
+	if (text.length <= USER_BUBBLE_CHARS) return text;
+	return `${text.slice(0, USER_BUBBLE_CHARS)}…（已附带 ${text.length} 字符上下文）`;
+}
+
+/**
+ * 按显示策略决定用户条目气泡文本：
+ * - `'auto'`（默认）：从 blocks 的 text 块拼出摘要；
+ * - `'none'`：不显示用户条目；
+ * - string：精确使用该字符串（调用方已自行概括，如「审查 src/a.ts」）。
+ * 返回 undefined 表示本次 prompt 不 emit 用户条目。
+ */
+function userEntryDisplayText(blocks: readonly ContentBlock[], strategy: 'auto' | 'none' | string): string | undefined {
+	if (strategy === 'none') return undefined;
+	if (strategy === 'auto') return fitUserBubble(promptText(blocks));
+	return fitUserBubble(strategy);
 }
 
 interface QueuedPrompt {
 	sessionId: string;
 	blocks: ContentBlock[];
+	userEntry: 'auto' | 'none' | string;
 	resolve: (outcome: PromptOutcome) => void;
 	reject: (error: Error) => void;
 }
@@ -463,18 +505,25 @@ export function createSessionService(runtime: DshRuntime, options: SessionServic
 		streaming.clear();
 	};
 
-	const runPrompt = async (sessionId: string, blocks: ContentBlock[]): Promise<PromptOutcome> => {
+	const runPrompt = async (
+		sessionId: string,
+		blocks: ContentBlock[],
+		userEntry: 'auto' | 'none' | string,
+	): Promise<PromptOutcome> => {
 		currentSessionId = sessionId;
 		emit({ type: 'busy', busy: true });
-		const refs = collectRefs(blocks);
-		const userEntry: TranscriptEntry = {
-			id: nextId('user'),
-			kind: 'user',
-			text: userEntryText(blocks),
-			refs: refs.length > 0 ? refs : undefined,
-			at: Date.now(),
-		};
-		emit({ type: 'entry', entry: userEntry });
+		const bubbleText = userEntryDisplayText(blocks, userEntry);
+		if (bubbleText !== undefined) {
+			const refs = collectRefs(blocks);
+			const entry: TranscriptEntry = {
+				id: nextId('user'),
+				kind: 'user',
+				text: bubbleText,
+				refs: refs.length > 0 ? refs : undefined,
+				at: Date.now(),
+			};
+			emit({ type: 'entry', entry });
+		}
 		try {
 			await ensureReady();
 			const peer = ensurePeer();
@@ -490,19 +539,23 @@ export function createSessionService(runtime: DshRuntime, options: SessionServic
 			const next = queue.shift();
 			if (next) {
 				// 出队后立刻接上：busy 从 false→true 只相隔一个同步调用，UI 不会闪烁。
-				void runPrompt(next.sessionId, next.blocks).then(next.resolve, next.reject);
+				void runPrompt(next.sessionId, next.blocks, next.userEntry).then(next.resolve, next.reject);
 			}
 		}
 	};
 
-	const startPrompt = (sessionId: string, blocks: ContentBlock[]): Promise<PromptOutcome> => {
+	const startPrompt = (
+		sessionId: string,
+		blocks: ContentBlock[],
+		userEntry: 'auto' | 'none' | string,
+	): Promise<PromptOutcome> => {
 		if (currentSessionId !== undefined) {
 			return new Promise<PromptOutcome>((resolve, reject) => {
-				queue.push({ sessionId, blocks, resolve, reject });
+				queue.push({ sessionId, blocks, userEntry, resolve, reject });
 				log(`[session] 上一个 prompt 仍在进行，排队中（队列长度 ${queue.length}）`);
 			});
 		}
-		return runPrompt(sessionId, blocks);
+		return runPrompt(sessionId, blocks, userEntry);
 	};
 
 	const failQueued = (reason: Error): void => {
@@ -645,9 +698,10 @@ export function createSessionService(runtime: DshRuntime, options: SessionServic
 			return localOptions;
 		},
 
-		prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptOutcome> {
+		prompt(sessionId: string, blocks: ContentBlock[], options?: PromptDisplayOptions): Promise<PromptOutcome> {
 			if (closed) return Promise.reject(new Error('会话服务已释放'));
-			return startPrompt(sessionId, blocks);
+			const userEntry = options?.userEntry ?? 'auto';
+			return startPrompt(sessionId, blocks, userEntry);
 		},
 
 		cancel(sessionId?: string): void {

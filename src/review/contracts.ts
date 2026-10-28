@@ -33,7 +33,19 @@ export interface ReviewService {
 	collectFile(uri?: vscode.Uri, kind?: ReviewKind): Promise<ReviewInput | undefined>;
 	collectSelection(kind: ReviewKind): Promise<ReviewInput | undefined>;
 	collectDiff(kind: DiffKind): Promise<ReviewInput | undefined>;
-	/** Quick pick over workspace files, returns context refs for the composer. */
+	/**
+	 * Prompt for the files changed during the latest turn: a diff limited to
+	 * those paths plus the embedded content of newly created files. Returns
+	 * `undefined` silently when the workspace is not a git repository or
+	 * nothing changed.
+	 */
+	collectTurnDiff(paths: readonly string[]): Promise<ReviewInput | undefined>;
+	/**
+	 * Quick pick over workspace files (plus a "从磁盘选择图片…" entry that opens a
+	 * native open dialog), returning context refs for the composer. Image refs
+	 * carry `kind: 'image'` + `mimeType` so the caller embeds them as ACP image
+	 * content blocks; everything else is attached as a `resource_link`.
+	 */
 	pickContextFiles(): Promise<ContextRef[]>;
 	/** Parse the agent's findings JSON contract and publish VS Code diagnostics. */
 	publishFindings(label: string, markdown: string): Promise<Finding[]>;

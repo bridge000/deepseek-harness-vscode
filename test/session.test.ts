@@ -308,6 +308,63 @@ describe('session prompt 事件映射', () => {
 		await expect(outcome).resolves.toEqual({ stopReason: 'end_turn' });
 	});
 
+	it("userEntry: 'none' 时不产生 user 条目，assistant 与 busy 事件保持不变", async () => {
+		const h = createHarness();
+		await createSession(h);
+		const outcome = h.service.prompt(SESSION_ID, [{ type: 'text', text: '请审查 src/a.ts' }], { userEntry: 'none' });
+		const request = await waitForRequest(h.transport, 'session/prompt');
+		expect(h.events.some((event) => event.type === 'busy' && event.busy)).toBe(true);
+		expect(h.events.some((event) => event.type === 'entry' && event.entry.kind === 'user')).toBe(false);
+
+		pushUpdate(h, { sessionUpdate: 'agent_message_chunk', messageId: 'm-none', content: { type: 'text', text: '好的' } });
+		expect(h.events.some((event) => event.type === 'entry' && event.entry.kind === 'assistant')).toBe(true);
+
+		h.transport.respond(request.id as number, { stopReason: 'end_turn' });
+		await expect(outcome).resolves.toEqual({ stopReason: 'end_turn' });
+		expect(h.events.at(-1)).toEqual({ type: 'busy', busy: false });
+		// 显示层隐藏用户条目，但不影响发给 agent 的完整 blocks。
+		expect((request.params as { prompt: unknown[] }).prompt).toEqual([{ type: 'text', text: '请审查 src/a.ts' }]);
+	});
+
+	it('userEntry 为字符串时气泡文本精确等于该字符串，不含提示词正文，refs 仍来自 blocks', async () => {
+		const h = createHarness();
+		await createSession(h);
+		const promptBody = `请以严格标准审查以下代码：${'const a = 1;'.repeat(80)}`;
+		const outcome = h.service.prompt(
+			SESSION_ID,
+			[
+				{ type: 'text', text: promptBody },
+				{ type: 'resource_link', uri: 'file:///workspace/src/a.ts', name: 'src/a.ts' },
+			],
+			{ userEntry: '审查 src/a.ts' },
+		);
+		const request = await waitForRequest(h.transport, 'session/prompt');
+		const userEntry = h.events.find((event) => event.type === 'entry' && event.entry.kind === 'user');
+		expect(userEntry).toMatchObject({ type: 'entry', entry: { kind: 'user', text: '审查 src/a.ts' } });
+		if (userEntry && userEntry.type === 'entry') {
+			expect(userEntry.entry.text).toBe('审查 src/a.ts');
+			expect(userEntry.entry.text).not.toContain('严格标准');
+			expect(userEntry.entry.refs).toEqual([{ name: 'src/a.ts', uri: 'file:///workspace/src/a.ts' }]);
+		}
+		h.transport.respond(request.id as number, { stopReason: 'end_turn' });
+		await expect(outcome).resolves.toEqual({ stopReason: 'end_turn' });
+	});
+
+	it('不传 options 时 user 气泡仍按现有 auto 摘要行为渲染', async () => {
+		const h = createHarness();
+		await createSession(h);
+		const longText = '上下文'.repeat(400);
+		const { outcome, request } = await startPrompt(h, longText);
+		const userEntry = h.events.find((event) => event.type === 'entry' && event.entry.kind === 'user');
+		const displayText = userEntry && userEntry.type === 'entry' ? userEntry.entry.text : '';
+		expect(userEntry).toMatchObject({ type: 'entry', entry: { kind: 'user', text: expect.stringContaining('…（已附带 1200 字符上下文）') } });
+		expect(displayText.length).toBeLessThan(700);
+		expect(displayText.startsWith('上下文')).toBe(true);
+		expect((request.params as { prompt: unknown[] }).prompt).toEqual([{ type: 'text', text: longText }]);
+		h.transport.respond(request.id as number, { stopReason: 'end_turn' });
+		await expect(outcome).resolves.toEqual({ stopReason: 'end_turn' });
+	});
+
 	it('dispose 时在飞 prompt 兜底发布 busy=false', async () => {
 		const h = createHarness();
 		await createSession(h);
@@ -349,7 +406,10 @@ describe('session prompt 事件映射', () => {
 		const h = createHarness();
 		await createSession(h);
 		pushUpdate(h, { sessionUpdate: 'usage_update', used: 20511, size: 1000000 });
-		expect(h.events.find((event) => event.type === 'usage')).toEqual({ type: 'usage', usage: { totalTokens: 20511 } });
+		expect(h.events.find((event) => event.type === 'usage')).toEqual({
+			type: 'usage',
+			usage: { totalTokens: 20511, contextSize: 1000000 },
+		});
 
 		const before = h.events.filter((event) => event.type === 'configOptions').length;
 		pushUpdate(h, {
@@ -358,6 +418,41 @@ describe('session prompt 事件映射', () => {
 		});
 		expect(h.events.filter((event) => event.type === 'configOptions').length).toBe(before + 1);
 		expect(h.service.active()?.configOptions[0]).toMatchObject({ id: 'reasoning_effort', currentValue: 'low' });
+	});
+
+	it('usage_update 的 size 保留为 contextSize（嵌套 usage 形状）', async () => {
+		const h = createHarness();
+		await createSession(h);
+		pushUpdate(h, { sessionUpdate: 'usage_update', usage: { used: 1200, size: 16000 } });
+		const usageEvent = h.events.find((event) => event.type === 'usage');
+		expect(usageEvent).toMatchObject({ type: 'usage', usage: { totalTokens: 1200, contextSize: 16000 } });
+	});
+
+	it('image content block 生成 kind=image 的 user refs，且原样发给 agent', async () => {
+		const h = createHarness();
+		await createSession(h);
+		const imageBlock = {
+			type: 'image' as const,
+			data: 'aGVsbG8=',
+			mimeType: 'image/png',
+			uri: 'file:///C:/x/a.png',
+		};
+		const outcome = h.service.prompt(
+			SESSION_ID,
+			[{ type: 'text', text: '请描述这张图' }, imageBlock],
+			{ userEntry: '看下图' },
+		);
+		const request = await waitForRequest(h.transport, 'session/prompt');
+		const userEntry = h.events.find((event) => event.type === 'entry' && event.entry.kind === 'user');
+		expect(userEntry).toMatchObject({ type: 'entry', entry: { kind: 'user', text: '看下图' } });
+		if (userEntry && userEntry.type === 'entry') {
+			expect(userEntry.entry.refs).toEqual([
+				{ name: 'a.png', uri: 'file:///C:/x/a.png', kind: 'image', mimeType: 'image/png' },
+			]);
+		}
+		expect((request.params as { prompt: unknown[] }).prompt[1]).toEqual(imageBlock);
+		h.transport.respond(request.id as number, { stopReason: 'end_turn' });
+		await expect(outcome).resolves.toEqual({ stopReason: 'end_turn' });
 	});
 
 	it('未知 sessionUpdate 与其它会话的通知被忽略并记录日志', async () => {
@@ -467,6 +562,24 @@ describe('session 单飞/排队/取消/-32601 降级', () => {
 		h.transport.respond(first.request.id as number, { stopReason: 'end_turn' });
 		await expect(first.outcome).resolves.toEqual({ stopReason: 'end_turn' });
 		const secondRequest = await waitForRequest(h.transport, 'session/prompt', first.request.id);
+		expect((secondRequest.params as { prompt: unknown[] }).prompt).toEqual([{ type: 'text', text: '第二' }]);
+		h.transport.respond(secondRequest.id as number, { stopReason: 'end_turn' });
+		await expect(secondOutcome).resolves.toEqual({ stopReason: 'end_turn' });
+	});
+
+	it('排队中的 prompt 出队后仍按各自的 userEntry 策略渲染', async () => {
+		const h = createHarness();
+		await createSession(h);
+		const first = await startPrompt(h, '第一');
+		const secondOutcome = h.service.prompt(SESSION_ID, [{ type: 'text', text: '第二' }], { userEntry: 'none' });
+		await flush();
+		expect(h.events.filter((event) => event.type === 'entry' && event.entry.kind === 'user')).toHaveLength(1);
+
+		h.transport.respond(first.request.id as number, { stopReason: 'end_turn' });
+		await expect(first.outcome).resolves.toEqual({ stopReason: 'end_turn' });
+		const secondRequest = await waitForRequest(h.transport, 'session/prompt', first.request.id);
+		// 第二个 prompt 明确 none：出队执行后不应再新增 user 条目。
+		expect(h.events.filter((event) => event.type === 'entry' && event.entry.kind === 'user')).toHaveLength(1);
 		expect((secondRequest.params as { prompt: unknown[] }).prompt).toEqual([{ type: 'text', text: '第二' }]);
 		h.transport.respond(secondRequest.id as number, { stopReason: 'end_turn' });
 		await expect(secondOutcome).resolves.toEqual({ stopReason: 'end_turn' });

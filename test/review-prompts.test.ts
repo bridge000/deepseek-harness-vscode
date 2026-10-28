@@ -133,6 +133,35 @@ describe('buildReviewPrompt: diff', () => {
 		const input = buildReviewPrompt(diffTarget({ truncated: true }), { maxChars: 20_000 });
 		expect(promptText(input.blocks)).toContain('diff 已按长度截断');
 	});
+
+	it('embeds new-file content after the diff and keeps the findings contract', () => {
+		const input = buildReviewPrompt(
+			diffTarget({
+				newFiles: [
+					{
+						path: 'src/new.ts',
+						text: 'export const a = 1;\nexport const b = 2;',
+						languageId: 'typescript',
+						totalLines: 2,
+					},
+				],
+			}),
+			{ maxChars: 20_000 },
+		);
+		expectNoResourceLinks(input.blocks);
+		const text = promptText(input.blocks);
+		expect(text).toContain('## 本轮新建文件（内容内嵌）');
+		expect(text).toContain('### src/new.ts');
+		expect(text).toContain('路径：src/new.ts');
+		expect(text).toContain('总行数：2');
+		expect(text).toContain('1| export const a = 1;');
+		expect(text).toContain('2| export const b = 2;');
+		// New-file paths are part of the "涉及文件" header too.
+		expect(text).toContain('涉及文件：src/a.ts、src/b.ts、src/new.ts');
+		// The review contract must survive the appended section.
+		expect(text).toContain('{"findings":[]}');
+		expect(text).toContain('"severity":"warning"');
+	});
 });
 
 describe('buildExplainPrompt', () => {

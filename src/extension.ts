@@ -2,18 +2,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 
-import type { DshRuntime, ProbeResult, SessionEvent, SessionService, TranscriptStore } from './acp/contracts';
+import type { DshRuntime, ProbeResult, PromptDisplayOptions, SessionEvent, SessionService, TranscriptStore } from './acp/contracts';
 import { discoverAcpProfiles, probeRuntime, repairAcpProfile } from './acp/compat';
 import { createDshRuntime, resolveExecutable } from './acp/runtime';
-import { findConfigOption, type ContentBlock } from './acp/protocol';
+import { findConfigOption, type ContentBlock, type ContentImage } from './acp/protocol';
 import { readConfig } from './config';
 import { createAutoContextCollector } from './context/autoContext';
+import { imageMimeType, isImagePath, isUnsupportedMediaPath, MAX_IMAGE_BYTES } from './context/media';
 import { Logger } from './log';
 import { formatModelValue, normalizeModelOptions, parseModelValue, readDshPreferredModel, sameModelRef, type ModelRef } from './model';
+import { modeLabel, modePromptBlock, permissionModeLabel, planModeRejectOption } from './mode/modes';
 import type { ReviewInput, ReviewService } from './review/contracts';
 import { registerFixCodeActions } from './review/quickFix';
 import { createReviewService } from './review/service';
 import { createSessionService } from './session/manager';
+import { enqueuePending, promotePending, removePending, takeNextPending } from './session/pending';
 import { createTranscriptStore } from './session/transcript';
 import type {
 	ActiveSession,
@@ -21,9 +24,12 @@ import type {
 	ConfigOption,
 	ContextRef,
 	Finding,
+	PendingMessage,
+	PermissionMode,
 	PermissionRequest,
 	RuntimeState,
 	SessionInfo,
+	SessionMode,
 	TranscriptEntry,
 	UiState,
 	UsageInfo,
@@ -40,6 +46,8 @@ const VIEW_ID = 'deepseekHarness.chat';
 const VERSION_KEY = 'deepseekHarness.lastGoodDshVersion';
 const ACTIVE_SESSION_KEY = 'deepseekHarness.activeSessionId';
 const LAST_MODEL_KEY = 'deepseekHarness.lastModel';
+const MODE_KEY = 'deepseekHarness.sessionMode';
+const AUTO_REVIEW_KEY = 'deepseekHarness.autoReview';
 
 const EMPTY_CAPABILITIES: RuntimeState['capabilities'] = {
 	sessionList: false,
@@ -99,6 +107,20 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 	private autoContextInfo?: AutoContextInfo;
 	private autoContextTimer?: NodeJS.Timeout;
 	private lastModel?: ModelRef;
+	/** Client-side collaboration mode (ACP has no session-mode surface). */
+	private mode: SessionMode = 'agent';
+	/** Review the turn's changes automatically once it settles. */
+	private autoReview = false;
+	/** Effective DSH permission preset; applied through the runtime env on (re)start. */
+	private permissionMode: PermissionMode = 'workspace-write';
+	/** Sidebar font scale (persisted via `deepseekHarness.fontScale`). */
+	private fontScale = 1;
+	/** Set while this controller itself writes `deepseekHarness.permissionMode`. */
+	private applyingPermissionPreset = false;
+	/** Background runtime autostart scheduled from `init()`. */
+	private autoStartTimer?: NodeJS.Timeout;
+	/** Guard against auto-review re-entry (its own prompt must not trigger another). */
+	private autoReviewInFlight = false;
 
 	private runtime?: DshRuntime;
 	private sessionService?: SessionService;
@@ -117,6 +139,10 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 	private lastTurnChanges: string[] = [];
 	private lastReviewLabel = '';
 	private promptQueue: Promise<unknown> = Promise.resolve();
+	/** Messages queued while the agent is busy (排队插话). */
+	private pending: PendingMessage[] = [];
+	private drainPromise?: Promise<void>;
+	private sessionPromise?: Promise<ActiveSession>;
 	private saveTimer?: NodeJS.Timeout;
 	private readyPromise?: Promise<void>;
 	private disposeSubscriptions: vscode.Disposable[] = [];
@@ -138,8 +164,13 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			log: this.logger,
 		});
 		this.lastModel = this.context.globalState.get<ModelRef>(LAST_MODEL_KEY);
+		const storedMode = this.context.globalState.get<string>(MODE_KEY);
+		this.mode = storedMode === 'plan' || storedMode === 'goal' ? storedMode : 'agent';
+		this.autoReview = this.context.globalState.get<boolean>(AUTO_REVIEW_KEY) === true;
+		this.permissionMode = readConfig().permissionMode;
+		this.fontScale = readConfig().fontScale;
 		const modalPicker = createPermissionPicker({
-			autoApprove: () => readConfig().autoApprove === 'all',
+			autoApprove: () => this.autoApproveEnabled(),
 			log: (line) => this.logger.raw(line),
 		});
 
@@ -149,9 +180,13 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			log: (line) => this.logger.raw(line),
 			onVisible: () => {
 				this.refreshAutoContext();
-				this.ensureReady().catch((error: unknown) => {
-					this.logger.warn(`自动启动运行时失败：${errorMessage(error)}`);
-				});
+				this.ensureReady()
+					// 打开面板时顺手建好会话：ACP 的 model / reasoning 配置项只在
+					// session/new 之后才下发，否则"刚启动时模型选项加载不出来"。
+					.then(() => this.ensureSession())
+					.catch((error: unknown) => {
+						this.logger.warn(`自动启动运行时失败：${errorMessage(error)}`);
+					});
 			},
 		});
 		this.permissionBroker = createPermissionBroker({
@@ -160,7 +195,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 				this.provider?.post({ type: 'permission', request });
 			},
 			modalPick: modalPicker,
-			autoApprove: () => readConfig().autoApprove === 'all',
+			autoApprove: () => this.autoApproveEnabled(),
 			log: (line) => this.logger.raw(line),
 			timeoutMs: 120_000,
 		});
@@ -170,6 +205,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			}),
 			vscode.window.onDidChangeActiveTextEditor(() => this.scheduleAutoContextRefresh()),
 			vscode.window.onDidChangeTextEditorSelection(() => this.scheduleAutoContextRefresh()),
+			vscode.workspace.onDidChangeConfiguration((event) => this.onConfigurationChanged(event)),
 			vscode.window.registerUriHandler({
 				handleUri: async () => {
 					await this.openChat();
@@ -191,6 +227,30 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		await this.restoreTranscript();
 		this.refreshAutoContext();
 		this.postState();
+		this.scheduleRuntimeAutostart();
+	}
+
+	/**
+	 * Start the DSH runtime in the background even if the sidebar was never
+	 * opened (Claude-Code-like behaviour). `ensureReady()` is single-flight, so a
+	 * later sidebar reveal or prompt reuses the same bootstrap.
+	 */
+	private scheduleRuntimeAutostart(): void {
+		const config = readConfig();
+		if (!config.autoStartRuntime || !config.workspaceRoot) return;
+		this.autoStartTimer = setTimeout(() => {
+			this.autoStartTimer = undefined;
+			if (this.disposed) return;
+			const latest = readConfig();
+			if (!latest.autoStartRuntime || !latest.workspaceRoot) return;
+			this.logger.info('后台自动启动 DSH 运行时');
+			void this.ensureReady()
+				// 后台预建会话，让面板一打开就有模型 / 推理配置项。
+				.then(() => this.ensureSession())
+				.catch((error: unknown) => {
+					this.logger.warn(`后台自动启动 DSH 失败：${errorMessage(error)}`);
+				});
+		}, 400);
 	}
 
 	private registerCommands(): void {
@@ -236,6 +296,11 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			history: this.history,
 			usage: this.usage,
 			autoContext: this.autoContextInfo,
+			mode: this.mode,
+			autoReview: this.autoReview,
+			permissionMode: this.permissionMode,
+			fontScale: this.fontScale,
+			pending: [...this.pending],
 		};
 	}
 
@@ -266,6 +331,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		this.busy = busy;
 		this.provider?.post({ type: 'busy', busy });
 		this.postState();
+		if (!busy) this.drainPending();
 	}
 
 	private upsertEntry(entry: TranscriptEntry): void {
@@ -280,6 +346,18 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		this.upsertEntry(entry);
 		this.provider?.post({ type: 'append', entries: [entry] });
 		this.scheduleSave();
+	}
+
+	/**
+	 * Transient status (session created, mode switched, runtime restarted …).
+	 *
+	 * Toasts stay out of the transcript on purpose: a notice row would otherwise
+	 * count as "conversation started" and hide the whale launch screen.
+	 */
+	private postToast(level: 'info' | 'warn' | 'error', text: string): void {
+		if (level === 'warn' || level === 'error') this.logger.warn(text);
+		else this.logger.info(text);
+		this.provider?.post({ type: 'toast', level, message: text });
 	}
 
 	private scheduleSave(): void {
@@ -376,6 +454,168 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		this.logger.info(`自动上下文已${enabled ? '开启' : '关闭'}`);
 		this.refreshAutoContext();
 		this.postState();
+	}
+
+	// -------------------------------------------------- modes and toggles ---
+
+	/**
+	 * Whether a permission request may be answered without asking the user.
+	 *
+	 * Plan mode always wins: it never auto-approves, because the whole point of
+	 * the mode is a read-only stance that the user did not have to police.
+	 */
+	private autoApproveEnabled(): boolean {
+		if (this.mode === 'plan') return false;
+		return readConfig().autoApprove === 'all';
+	}
+
+	private postPrefs(): void {
+		this.provider?.post({
+			type: 'prefs',
+			mode: this.mode,
+			autoReview: this.autoReview,
+			permissionMode: this.permissionMode,
+			fontScale: this.fontScale,
+		});
+	}
+
+	setMode(mode: SessionMode): void {
+		if (this.mode === mode) return;
+		this.mode = mode;
+		void this.context.globalState.update(MODE_KEY, mode);
+		this.logger.info(`协作模式切换为「${modeLabel(mode)}」`);
+		this.postPrefs();
+		this.postState();
+		if (mode === 'plan') this.postToast('info', '计划模式：只读分析，写入请求会被自动拒绝。');
+	}
+
+	setAutoReview(enabled: boolean): void {
+		if (this.autoReview === enabled) return;
+		this.autoReview = enabled;
+		void this.context.globalState.update(AUTO_REVIEW_KEY, enabled);
+		this.logger.info(`自动审查已${enabled ? '开启' : '关闭'}`);
+		this.postPrefs();
+		this.postState();
+	}
+
+	/**
+	 * Switch the effective permission preset.
+	 *
+	 * ACP cannot switch the sandbox at runtime: `DSH_PERMISSION_MODE` is read
+	 * when the DSH process starts. The preset is therefore persisted, the
+	 * runtime restarts with the new environment, and the previous session is
+	 * resumed. An in-flight turn is refused instead of being silently killed.
+	 */
+	async setPermissionMode(mode: PermissionMode): Promise<void> {
+		if (this.permissionMode === mode) return;
+		if (this.busy) {
+			void vscode.window.showInformationMessage('正在处理中：结束或停止当前任务后再切换权限。');
+			return;
+		}
+		const previous = this.permissionMode;
+		const previousSessionId = this.activeSession?.sessionId;
+		this.permissionMode = mode;
+		await this.persistPermissionMode(mode);
+		this.postPrefs();
+		this.postState();
+		const ready = this.runtime?.state().phase === 'ready';
+		this.postToast(
+			'info',
+			`权限已切换为「${permissionModeLabel(mode)}」${ready ? '，正在重启 DSH 运行时…' : '，将在启动运行时生效。'}`,
+		);
+		if (!ready) return;
+		try {
+			await this.restartCore(previousSessionId);
+		} catch (error) {
+			this.permissionMode = previous;
+			await this.persistPermissionMode(previous);
+			this.postPrefs();
+			this.postState();
+			this.appendNotice('error', `切换权限失败：${errorMessage(error)}（已回滚为「${permissionModeLabel(previous)}」）`);
+			void vscode.window.showErrorMessage(`切换权限失败：${errorMessage(error)}`);
+		}
+	}
+
+	/** Persist the preset to workspace settings (falling back to user settings); never throws. */
+	private async persistPermissionMode(mode: PermissionMode): Promise<void> {
+		const configuration = vscode.workspace.getConfiguration('deepseekHarness');
+		this.applyingPermissionPreset = true;
+		try {
+			try {
+				await configuration.update('permissionMode', mode, vscode.ConfigurationTarget.Workspace);
+			} catch (error) {
+				this.logger.warn(`写入工作区权限设置失败，改用用户设置：${errorMessage(error)}`);
+				await configuration.update('permissionMode', mode, vscode.ConfigurationTarget.Global);
+			}
+		} catch (error) {
+			this.logger.warn(`写入权限设置失败（仅本次运行生效）：${errorMessage(error)}`);
+		} finally {
+			this.applyingPermissionPreset = false;
+		}
+	}
+
+	/** Persist and apply the sidebar font scale (0.8–1.8); non-fatal on write errors. */
+	async setFontScale(value: number): Promise<void> {
+		if (!Number.isFinite(value)) return;
+		const next = Math.min(1.8, Math.max(0.8, Math.round(value * 20) / 20));
+		if (Math.abs(next - this.fontScale) < 0.001) return;
+		this.fontScale = next;
+		const configuration = vscode.workspace.getConfiguration('deepseekHarness');
+		try {
+			await configuration.update('fontScale', next, vscode.ConfigurationTarget.Workspace);
+		} catch (error) {
+			try {
+				await configuration.update('fontScale', next, vscode.ConfigurationTarget.Global);
+			} catch (inner) {
+				this.logger.warn(`写入字号设置失败（仅本次运行生效）：${errorMessage(inner)}`);
+			}
+		}
+		this.postPrefs();
+		this.postState();
+	}
+
+	private onConfigurationChanged(event: vscode.ConfigurationChangeEvent): void {
+		if (event.affectsConfiguration('deepseekHarness.fontScale')) {
+			const configuredFontScale = readConfig().fontScale;
+			if (Math.abs(configuredFontScale - this.fontScale) > 0.001) {
+				this.fontScale = configuredFontScale;
+				this.postPrefs();
+			}
+			this.postState();
+		}
+		if (this.applyingPermissionPreset || !event.affectsConfiguration('deepseekHarness.permissionMode')) return;
+		const configured = readConfig().permissionMode;
+		if (configured === this.permissionMode) return;
+		this.permissionMode = configured;
+		this.postPrefs();
+		this.postState();
+		if (this.runtime?.state().phase === 'ready') {
+			void vscode.window
+				.showInformationMessage('权限设置已更改，重启 DSH 运行时后生效。', '立即重启')
+				.then((action) => {
+					if (action === '立即重启') void this.restartRuntime();
+				});
+		}
+	}
+
+	/**
+	 * Route one ACP permission request.
+	 *
+	 * In plan mode a write/command request is refused with the agent's own
+	 * reject option and a notice; read-only requests are approved silently so
+	 * planning does not drown the user in cards.
+	 */
+	private async pickPermission(request: PermissionRequest): Promise<string | undefined> {
+		if (this.mode === 'plan') {
+			const reject = planModeRejectOption(request);
+			if (reject) {
+				this.appendNotice('warn', `计划模式已拒绝「${request.title}」：切回「自动」模式后可执行。`);
+				return reject;
+			}
+			const allow = request.options.find((option) => option.kind.startsWith('allow_'));
+			return allow?.optionId;
+		}
+		return this.permissionBroker?.pick(request);
 	}
 
 	// -------------------------------------------------------------- models ---
@@ -507,7 +747,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 				executable: config.executable,
 				profile,
 				cwd: config.workspaceRoot,
-				permissionMode: config.permissionMode,
+				permissionMode: this.permissionMode,
 				log: (line) => this.logger.raw(`[runtime] ${line}`),
 				onDirtyStdout: (line) => this.logger.raw(`[stdout] ${line}`),
 			});
@@ -521,8 +761,8 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			const state = await runtime.start();
 			this.sessionService = createSessionService(runtime, {
 				cwd: () => readConfig().workspaceRoot,
-				pickPermission: (request) => this.permissionBroker?.pick(request) ?? Promise.resolve(undefined),
-				autoApprove: () => readConfig().autoApprove === 'all',
+				pickPermission: (request) => this.pickPermission(request),
+				autoApprove: () => this.autoApproveEnabled(),
 				log: (line) => this.logger.raw(`[session] ${line}`),
 				onEvent: (event) => this.onSessionEvent(event),
 			});
@@ -609,6 +849,14 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 	// ------------------------------------------------------------- session ---
 
 	private async ensureSession(): Promise<ActiveSession> {
+		if (this.sessionPromise) return this.sessionPromise;
+		this.sessionPromise = this.ensureSessionInner().finally(() => {
+			this.sessionPromise = undefined;
+		});
+		return this.sessionPromise;
+	}
+
+	private async ensureSessionInner(): Promise<ActiveSession> {
 		if (!this.sessionService) throw new Error('会话服务尚未就绪');
 		const current = this.sessionService.active();
 		if (current) {
@@ -638,16 +886,20 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		return run;
 	}
 
-	private async runPrompt(label: string, blocks: ContentBlock[]): Promise<{ text: string; stopReason: string }> {
+	private async runPrompt(
+		label: string,
+		blocks: ContentBlock[],
+		display?: PromptDisplayOptions,
+	): Promise<{ text: string; stopReason: string }> {
 		return this.enqueue(async () => {
 			await this.ensureReady();
 			const session = await this.ensureSession();
 			// The session manager emits the user transcript entry itself (including
-			// context refs); we only need a marker to collect this turn's assistant
-			// text once the prompt settles.
+			// context refs and the display policy); we only need a marker to collect
+			// this turn's assistant text once the prompt settles.
 			const marker = this.transcript.length;
 			this.logger.info(`发送 prompt：${label}`);
-			const outcome = await this.sessionService!.prompt(session.sessionId, blocks);
+			const outcome = await this.sessionService!.prompt(session.sessionId, blocks, display);
 			const text = this.transcript
 				.slice(marker)
 				.filter((entry): entry is Extract<TranscriptEntry, { kind: 'assistant' }> => entry.kind === 'assistant')
@@ -661,25 +913,142 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 
 	// ------------------------------------------------------- ChatController ---
 
-	async send(text: string, refs: ContextRef[] = []): Promise<void> {
+	/** Turn one attached ref into an ACP content block (image content or resource link). */
+	private async buildRefBlock(ref: ContextRef): Promise<ContentBlock | undefined> {
+		if (ref.kind === 'image' || isImagePath(ref.uri)) {
+			return this.readImageBlock(ref);
+		}
+		if (isUnsupportedMediaPath(ref.uri)) {
+			this.postToast('warn', `暂不支持音频/视频附件，已跳过：${ref.name}`);
+			return undefined;
+		}
+		return { type: 'resource_link', uri: ref.uri, name: ref.name };
+	}
+
+	/** Read one image attachment as a base64 ACP image block, or `undefined` when skipped. */
+	private async readImageBlock(ref: ContextRef): Promise<ContentImage | undefined> {
+		const runtime = this.getState().runtime;
+		if (!runtime.capabilities.imagePrompts) {
+			this.postToast('warn', `当前模型/路由不支持图片提示，已跳过：${ref.name}`);
+			return undefined;
+		}
+		const mimeType = ref.mimeType ?? imageMimeType(ref.uri);
+		if (!mimeType) {
+			this.postToast('warn', `不支持的图片格式，已跳过：${ref.name}`);
+			return undefined;
+		}
+		try {
+			const bytes = await vscode.workspace.fs.readFile(vscode.Uri.parse(ref.uri));
+			if (bytes.byteLength > MAX_IMAGE_BYTES) {
+				this.postToast('warn', `图片超过 ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB，已跳过：${ref.name}`);
+				return undefined;
+			}
+			return { type: 'image', mimeType, data: Buffer.from(bytes).toString('base64'), uri: ref.uri };
+		} catch (error) {
+			this.logger.warn(`读取图片失败：${ref.name}（${errorMessage(error)}）`);
+			this.postToast('warn', `读取图片失败，已跳过：${ref.name}`);
+			return undefined;
+		}
+	}
+
+	async send(text: string, refs: ContextRef[] = [], pendingMode?: 'queue' | 'steer'): Promise<void> {
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		// Auto context first (focused file/selection + scope instructions), then
-		// the user's question, then explicitly attached @file links.
-		const blocks: ContentBlock[] = [...this.collectAutoContextBlocks(), { type: 'text', text: trimmed }];
+		// While a turn is running (or a queue already exists) do not interrupt:
+		// store the message locally and send it when the runtime is idle again.
+		if (this.busy || this.pending.length > 0) {
+			this.enqueuePendingMessage(trimmed, refs, pendingMode);
+			return;
+		}
+		await this.sendNow(trimmed, refs);
+		this.drainPending();
+	}
+
+	/** Queue one interjection while the agent is busy; `steer` jumps the queue. */
+	private enqueuePendingMessage(text: string, refs: ContextRef[], mode: 'queue' | 'steer' = 'queue'): void {
+		const item: PendingMessage = {
+			id: uid(),
+			text,
+			refs: refs.length > 0 ? refs : undefined,
+			mode,
+			at: Date.now(),
+		};
+		this.pending = mode === 'steer' ? promotePending(enqueuePending(this.pending, item), item.id) : enqueuePending(this.pending, item);
+		this.postToast('info', mode === 'steer' ? '已加入引导：当前回复结束后立即发送。' : '已排队：当前回复结束后自动发送。');
+		this.postState();
+		if (!this.busy) this.drainPending();
+	}
+
+	/** Send one message immediately (no queue check): builds ACP blocks and runs it. */
+	private async sendNow(text: string, refs: ContextRef[]): Promise<void> {
+		const trimmed = text.trim();
+		if (!trimmed) return;
+		// Mode guidance first (ACP exposes no session modes), then the auto
+		// context, then the user's question, then attached @file links.
+		const blocks: ContentBlock[] = [];
+		const modeBlock = modePromptBlock(this.mode);
+		if (modeBlock) blocks.push(modeBlock);
+		blocks.push(...this.collectAutoContextBlocks(), { type: 'text', text: trimmed });
 		for (const ref of refs) {
-			blocks.push({ type: 'resource_link', uri: ref.uri, name: ref.name });
+			const block = await this.buildRefBlock(ref);
+			if (block) blocks.push(block);
 		}
 		try {
 			await this.review?.beginChanges().catch(() => undefined);
-			await this.runPrompt('聊天', blocks);
+			// The bubble shows only what the user typed: instructions, inline code
+			// and auto context stay out of the transcript.
+			await this.runPrompt('聊天', blocks, { userEntry: trimmed });
 			const changed = (await this.review?.endChanges()) ?? [];
 			if (changed.length > 0) {
 				this.lastTurnChanges = changed;
-				await this.notifyChanges(changed);
+				// Fire-and-forget: the notice is informational and must not delay
+				// the auto review that follows.
+				void this.notifyChanges(changed).catch((error: unknown) => {
+					this.logger.warn(`提示本轮改动失败：${errorMessage(error)}`);
+				});
+			}
+			if (this.autoReview && this.mode !== 'plan' && changed.length > 0) {
+				await this.runAutoReview(changed);
 			}
 		} catch (error) {
 			this.appendNotice('error', `发送失败：${errorMessage(error)}`);
+		}
+	}
+
+	/** Promote (`steer`) or drop (`cancel`) one queued interjection. */
+	pendingAction(id: string, action: 'steer' | 'cancel'): void {
+		if (action === 'cancel') {
+			const next = removePending(this.pending, id);
+			if (next.length === this.pending.length) return;
+			this.pending = next;
+			this.postToast('info', '已取消排队消息。');
+			this.postState();
+			return;
+		}
+		if (!this.pending.some((item) => item.id === id)) return;
+		this.pending = promotePending(this.pending, id);
+		this.postToast('info', '已转为引导：当前回复结束后立即发送。');
+		this.postState();
+		if (!this.busy) this.drainPending();
+	}
+
+	/** Drain queued interjections once the current turn settled (single-flight). */
+	private drainPending(): void {
+		if (this.drainPromise) return;
+		this.drainPromise = this.runDrain().finally(() => {
+			this.drainPromise = undefined;
+			this.postState();
+		});
+	}
+
+	private async runDrain(): Promise<void> {
+		for (;;) {
+			if (this.disposed || this.busy) return;
+			const next = takeNextPending(this.pending);
+			if (!next) return;
+			this.pending = next.rest;
+			this.postState();
+			await this.sendNow(next.item.text, next.item.refs ?? []);
 		}
 	}
 
@@ -691,7 +1060,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		const sessionId = this.activeSession?.sessionId;
 		if (sessionId) this.sessionService?.cancel(sessionId);
 		this.permissionBroker?.cancelAll('用户取消任务');
-		this.appendNotice('info', '已请求停止当前任务。');
+		this.postToast('info', '已请求停止当前任务。');
 	}
 
 	async newSession(): Promise<void> {
@@ -700,6 +1069,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			this.permissionBroker?.cancelAll('新建会话');
 			await this.sessionService?.close();
 			this.activeSession = undefined;
+			this.pending = [];
 			this.transcript = [];
 			this.findings = [];
 			this.usage = undefined;
@@ -707,7 +1077,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			this.provider?.post({ type: 'findings', findings: [] });
 			await this.ensureSession();
 			this.refreshAutoContext();
-			this.appendNotice('info', '已新建会话。');
+			this.postToast('info', '已新建会话。');
 		} catch (error) {
 			this.appendNotice('error', `新建会话失败：${errorMessage(error)}`);
 		}
@@ -727,7 +1097,7 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			this.provider?.post({ type: 'configOptions', configOptions: this.configOptions });
 			this.provider?.post({ type: 'findings', findings: [] });
 			this.postState();
-			this.appendNotice('info', `已恢复会话 ${sessionId.slice(0, 8)}。`);
+			this.postToast('info', `已恢复会话 ${sessionId.slice(0, 8)}。`);
 		} catch (error) {
 			this.appendNotice('error', `恢复会话失败：${errorMessage(error)}`);
 		}
@@ -798,23 +1168,57 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 
 	async restartRuntime(): Promise<void> {
 		try {
-			this.permissionBroker?.cancelAll('重启运行时');
-			await this.sessionService?.close().catch(() => undefined);
-			this.sessionService = undefined;
-			await this.runtime?.stop().catch(() => undefined);
-			this.runtime = undefined;
-			this.activeSession = undefined;
-			this.probe = undefined;
-			this.runtimeError = undefined;
-			this.busy = false;
-			this.postState();
-			this.appendNotice('info', '重新启动 DSH 运行时…');
-			await this.ensureReady();
-			await this.ensureSession();
-			this.refreshAutoContext();
-			this.appendNotice('info', 'DSH 运行时已重启。');
+			this.postToast('info', '重新启动 DSH 运行时…');
+			await this.restartCore(undefined);
+			this.postToast('info', 'DSH 运行时已重启。');
 		} catch (error) {
 			this.appendNotice('error', `重启运行时失败：${errorMessage(error)}`);
+		}
+	}
+
+	/**
+	 * Stop the ACP runtime and start a fresh one, optionally resuming a session.
+	 *
+	 * Shared by the restart command and the permission-preset switch (the new
+	 * `DSH_PERMISSION_MODE` only takes effect on a fresh process).
+	 */
+	private async restartCore(resumeSessionId?: string): Promise<void> {
+		this.permissionBroker?.cancelAll('重启运行时');
+		await this.sessionService?.close().catch(() => undefined);
+		this.sessionService = undefined;
+		await this.runtime?.stop().catch(() => undefined);
+		this.runtime = undefined;
+		this.activeSession = undefined;
+		this.probe = undefined;
+		this.runtimeError = undefined;
+		this.busy = false;
+		this.postState();
+		await this.ensureReady();
+		if (resumeSessionId) {
+			await this.resumeAfterRestart(resumeSessionId);
+		} else {
+			await this.ensureSession();
+		}
+		this.refreshAutoContext();
+	}
+
+	private async resumeAfterRestart(sessionId: string): Promise<void> {
+		try {
+			const entries = this.transcriptStore?.load(sessionId) ?? [];
+			const session = await this.sessionService!.resume(sessionId, readConfig().workspaceRoot);
+			this.activeSession = session;
+			await this.applyModelPreference(session);
+			this.transcript = entries;
+			this.findings = [];
+			this.review?.clearFindings();
+			void this.context.globalState.update(ACTIVE_SESSION_KEY, session.sessionId);
+			this.provider?.post({ type: 'configOptions', configOptions: this.configOptions });
+			this.provider?.post({ type: 'findings', findings: [] });
+			this.postState();
+			this.postToast('info', `已恢复会话 ${session.sessionId.slice(0, 8)}。`);
+		} catch (error) {
+			this.appendNotice('warn', `恢复原会话失败：${errorMessage(error)}，已新建会话。`);
+			await this.ensureSession();
 		}
 	}
 
@@ -887,7 +1291,10 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		}
 		let text = '';
 		try {
-			({ text } = await this.runPrompt(input.label, input.blocks));
+			// Review prompts already constrain the agent to the embedded content and
+			// are read-only by construction: no mode guidance here, or it would
+			// compete with the findings contract the review relies on.
+			({ text } = await this.runPrompt(input.label, input.blocks, { userEntry: input.label }));
 		} catch (error) {
 			this.appendNotice('error', `审查失败：${errorMessage(error)}`);
 			return;
@@ -925,11 +1332,15 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			void vscode.window.showInformationMessage('还没有审查发现；请先运行一次代码审查。');
 			return;
 		}
+		if (this.mode === 'plan') {
+			void vscode.window.showInformationMessage('计划模式不会修改文件；请先把输入区模式切回「自动」。');
+			return;
+		}
 		await vscode.commands.executeCommand('deepseekHarness.openChat');
 		const prompt = fixPrompt(JSON.stringify(report.findings, null, 2));
 		try {
 			await this.review?.beginChanges();
-			await this.runPrompt('修复审查发现', [{ type: 'text', text: prompt }]);
+			await this.runPrompt('修复审查发现', [{ type: 'text', text: prompt }], { userEntry: '修复审查发现' });
 			const changed = (await this.review?.endChanges()) ?? [];
 			this.lastTurnChanges = changed;
 			this.appendNotice('info', changed.length > 0 ? `修复完成，本轮改动 ${changed.length} 个文件。` : '修复完成，未检测到文件改动。');
@@ -951,11 +1362,17 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 			void vscode.window.showWarningMessage('无效的审查发现，已取消修复。');
 			return;
 		}
+		if (this.mode === 'plan') {
+			void vscode.window.showInformationMessage('计划模式不会修改文件；请先把输入区模式切回「自动」。');
+			return;
+		}
 		await vscode.commands.executeCommand('deepseekHarness.openChat');
 		const prompt = fixPrompt(JSON.stringify([finding], null, 2));
 		try {
 			await this.review.beginChanges();
-			await this.runPrompt(`修复 ${finding.file}:${finding.line}`, [{ type: 'text', text: prompt }]);
+			await this.runPrompt(`修复 ${finding.file}:${finding.line}`, [{ type: 'text', text: prompt }], {
+				userEntry: `修复 ${finding.file}:${finding.line}`,
+			});
 			const changed = (await this.review.endChanges()) ?? [];
 			this.lastTurnChanges = changed;
 			this.appendNotice('info', changed.length > 0 ? `修复完成，本轮改动 ${changed.length} 个文件。` : '修复完成，未检测到文件改动。');
@@ -1020,6 +1437,42 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		else if (action === '撤销本轮修改') await this.revertTurnChanges();
 	}
 
+	/**
+	 * Review the files the turn changed, right after the turn settles.
+	 *
+	 * Deliberately bypasses `beginChanges`/`endChanges`: the turn's undo baseline
+	 * must stay valid, and the review prompt must not become another tracked turn.
+	 */
+	private async runAutoReview(changed: readonly string[]): Promise<void> {
+		if (this.autoReviewInFlight || !this.review) return;
+		this.autoReviewInFlight = true;
+		try {
+			const input = await this.review.collectTurnDiff(changed);
+			if (!input) {
+				this.logger.info('自动审查：本轮没有可审查的 diff（非 git 或无文本改动），已跳过。');
+				return;
+			}
+			this.appendNotice('info', '正在自动审查本轮改动…');
+			const { text } = await this.runPrompt('自动审查本轮改动', input.blocks, { userEntry: 'none' });
+			const findings = await this.review.publishFindings('自动审查本轮改动', text);
+			this.findings = findings;
+			this.lastReviewLabel = '自动审查本轮改动';
+			this.provider?.post({ type: 'findings', findings });
+			this.postState();
+			this.appendNotice(
+				'info',
+				findings.length === 0
+					? '自动审查完成：未发现问题。'
+					: `自动审查完成：${findings.length} 个问题，已显示在「审查结果」面板。`,
+			);
+		} catch (error) {
+			this.logger.warn(`自动审查失败：${errorMessage(error)}`);
+			this.appendNotice('warn', `自动审查失败：${errorMessage(error)}`);
+		} finally {
+			this.autoReviewInFlight = false;
+		}
+	}
+
 	// ------------------------------------------------------------- history ---
 
 	private async showHistory(): Promise<void> {
@@ -1066,6 +1519,10 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 				`sessionService: ${this.sessionService ? 'ready' : 'not-created'}`,
 				`lastReview: ${this.lastReviewLabel || '(none)'}`,
 				`turnChanges: ${this.lastTurnChanges.length}`,
+				`mode: ${this.mode}`,
+				`autoReview: ${String(this.autoReview)}`,
+				`permissionMode: ${this.permissionMode}`,
+				`fontScale: ${String(this.fontScale)}`,
 			],
 		};
 	}
@@ -1087,6 +1544,10 @@ class DeepSeekHarnessController implements ChatController, vscode.Disposable {
 		if (this.autoContextTimer) {
 			clearTimeout(this.autoContextTimer);
 			this.autoContextTimer = undefined;
+		}
+		if (this.autoStartTimer) {
+			clearTimeout(this.autoStartTimer);
+			this.autoStartTimer = undefined;
 		}
 		this.permissionBroker?.cancelAll('扩展停用');
 		for (const subscription of this.disposeSubscriptions.splice(0)) {

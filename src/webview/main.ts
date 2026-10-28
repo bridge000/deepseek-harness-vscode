@@ -6,19 +6,22 @@
  * `acquireVsCodeApi().postMessage`，消息形状见 `../ui/protocol.ts`；扩展推送的
  * 增量消息（append/patch/busy/...）与全量 state 都能渲染。
  *
- * 0.3 UI 迭代：紧凑单行头部、气泡/助手消息、单行工具卡、可折叠 findings、
- * 圆形输入区、滚动回底浮层、空状态快捷动作。
+ * 0.6 UI：输入区改成 DSH Web 式统一二级菜单（`+` / 权限 / 模型 / 推理 / 顶部 ⋯ 全部走
+ * `menu.ts` 的 popover），模式与自动审查并入菜单，输入 `/` 弹出斜杠指令面板；
+ * `deepseekHarness.fontScale` 通过 `--dsh-font-scale` 作用到整个侧边栏。
  */
 import type {
 	AcpCapabilities,
 	AutoContextInfo,
 	ConfigOption,
-	ConfigOptionValue,
 	ContextRef,
 	Finding,
+	PendingMessage,
+	PermissionMode,
 	PermissionOptionInfo,
 	PermissionRequest,
 	RuntimePhase,
+	SessionMode,
 	TranscriptEntry,
 	UiState,
 } from '../types';
@@ -28,20 +31,61 @@ import { renderMarkdown } from './markdown';
 import { groupThoughtEntries, thoughtHeader } from './thought';
 import type { ThoughtGroup } from './thought';
 import {
+	composerHintText,
+	contextUsagePercent,
 	filterFindings,
 	findingFilterLabel,
+	FONT_SCALES,
+	fontScaleIndex,
+	fontScalePercent,
 	formatRelativeTime,
 	formatTimestamp,
 	formatToolDuration,
 	formatUsageText,
 	headerTitle,
+	modeLabel,
+	modeMenuItems,
+	modelMenuGroups,
+	permissionDescription,
+	permissionHint,
+	permissionLabel,
+	permissionMenuItems,
+	reasoningChipLabel,
 	severityCounts,
+	shouldShowLaunch,
+	stripFindingsBlock,
 	toolKindIcon,
 	toolStatusGlyph,
 	toolStatusLabel,
 	truncateTitle,
+	usageBadgeText,
 } from './format';
-import type { FindingFilter } from './format';
+import type { FindingFilter, MenuItemModel } from './format';
+import { imageMimeType, isUnsupportedMediaPath, refNameFromUri } from '../context/media';
+import {
+	closePopoverMenu,
+	highlightPopoverItem,
+	icon,
+	isPopoverMenuOpen,
+	openPopoverMenu,
+} from './menu';
+import type { MenuEntry } from './menu';
+import {
+	FISH_LOGO_PATH,
+	FISH_LOGO_VIEWBOX,
+	WORDMARK_BADGE,
+	WORDMARK_BADGE_CLIP,
+	WORDMARK_BADGE_LETTERS,
+	WORDMARK_LETTERS,
+	WORDMARK_TEXT_VIEWBOX,
+} from './brand';
+import {
+	SLASH_COMMANDS,
+	matchSlashCommands,
+	parseSlashCommand,
+	shouldShowSlashPalette,
+} from './slashCommands';
+import type { SlashCommand } from './slashCommands';
 
 type ToolEntry = Extract<TranscriptEntry, { kind: 'tool' }>;
 
@@ -118,7 +162,53 @@ function createInitialState(): UiState {
 		transcript: [],
 		findings: [],
 		history: [],
+		mode: 'agent',
+		autoReview: false,
+		permissionMode: 'workspace-write',
+		fontScale: 1,
+		pending: [],
 	};
+}
+
+/** 排队消息：只接受扩展侧下发的形状，脏数据丢弃。 */
+function normalizePending(value: unknown): PendingMessage[] {
+	if (!Array.isArray(value)) return [];
+	const items: PendingMessage[] = [];
+	for (const raw of value) {
+		if (typeof raw !== 'object' || raw === null) continue;
+		const item = raw as { id?: unknown; text?: unknown; refs?: unknown; mode?: unknown; at?: unknown };
+		if (typeof item.id !== 'string' || typeof item.text !== 'string' || item.text.trim().length === 0) continue;
+		const refs = normalizeRefs(item.refs);
+		items.push({
+			id: item.id,
+			text: item.text,
+			refs: refs.length > 0 ? refs : undefined,
+			mode: item.mode === 'steer' ? 'steer' : 'queue',
+			at: typeof item.at === 'number' ? item.at : Date.now(),
+		});
+	}
+	return items;
+}
+
+/** 模式只接受协议里的三个值，其余（含历史持久化脏数据）一律回落到「自动」。 */
+function normalizeMode(value: unknown): SessionMode {
+	return value === 'plan' || value === 'goal' ? value : 'agent';
+}
+
+/** 权限预设只接受协议里的三个值，脏数据回落到「工作区内」。 */
+function normalizePermissionMode(value: unknown): PermissionMode {
+	return value === 'read-only' || value === 'danger-full-access' ? value : 'workspace-write';
+}
+
+/** 字号缩放：扩展侧已夹紧到 0.8–1.8，这里再兜一层，非法值回落到 1。 */
+function normalizeFontScale(value: unknown): number {
+	const scale = typeof value === 'number' ? value : Number(value);
+	if (!Number.isFinite(scale)) return 1;
+	return Math.min(1.8, Math.max(0.8, scale));
+}
+
+function applyFontScale(scale: number): void {
+	document.documentElement.style.setProperty('--dsh-font-scale', String(normalizeFontScale(scale)));
 }
 
 function normalizeRefs(value: unknown): ContextRef[] {
@@ -126,9 +216,13 @@ function normalizeRefs(value: unknown): ContextRef[] {
 	const refs: ContextRef[] = [];
 	for (const item of value) {
 		if (typeof item !== 'object' || item === null) continue;
-		const ref = item as { name?: unknown; uri?: unknown };
+		const ref = item as { name?: unknown; uri?: unknown; kind?: unknown; mimeType?: unknown };
 		if (typeof ref.name !== 'string' || typeof ref.uri !== 'string') continue;
-		refs.push({ name: ref.name, uri: ref.uri });
+		const contextRef: ContextRef = { name: ref.name, uri: ref.uri };
+		if (ref.kind === 'image') contextRef.kind = 'image';
+		else if (ref.kind === 'file') contextRef.kind = 'file';
+		if (typeof ref.mimeType === 'string' && ref.mimeType.length > 0) contextRef.mimeType = ref.mimeType;
+		refs.push(contextRef);
 	}
 	return refs;
 }
@@ -158,13 +252,6 @@ function currentConfigValue(option: ConfigOption | undefined): string {
 	return '';
 }
 
-function currentConfigLabel(option: ConfigOption | undefined): string {
-	const value = currentConfigValue(option);
-	if (!value) return '';
-	const match = option?.values.find((item) => item.value === value);
-	return match?.name ?? value;
-}
-
 // ---------------------------------------------------------------------------
 // 界面骨架
 // ---------------------------------------------------------------------------
@@ -172,9 +259,7 @@ function currentConfigLabel(option: ConfigOption | undefined): string {
 interface UiRefs {
 	statusDot: HTMLSpanElement;
 	sessionTitle: HTMLSpanElement;
-	modelPill: HTMLSpanElement;
 	menuButton: HTMLButtonElement;
-	menu: HTMLDivElement;
 	historyPanel: HTMLDivElement;
 	banner: HTMLDivElement;
 	bannerText: HTMLSpanElement;
@@ -201,18 +286,22 @@ interface UiRefs {
 	chips: HTMLDivElement;
 	input: HTMLTextAreaElement;
 	btnPickContext: HTMLButtonElement;
-	modelWrap: HTMLLabelElement;
-	modelSelect: HTMLSelectElement;
-	reasoningWrap: HTMLLabelElement;
-	reasoningSelect: HTMLSelectElement;
+	composerShell: HTMLDivElement;
+	composerHint: HTMLDivElement;
+	modeBadge: HTMLButtonElement;
+	permissionChip: HTMLButtonElement;
+	modelChip: HTMLButtonElement;
+	btnStop: HTMLButtonElement;
+	btnSteer: HTMLButtonElement;
 	btnSend: HTMLButtonElement;
+	pendingBar: HTMLDivElement;
 	toast: HTMLDivElement;
 }
 
 function buildUi(root: HTMLElement): UiRefs {
 	root.classList.add('app');
 
-	// 顶部：状态点 + 本地标题 + 模型 pill + 「⋯」菜单（版本/ACP/token 在状态点 tooltip）
+	// 顶部：状态点 + 本地标题 + 「⋯」菜单（版本/ACP/token 在状态点 tooltip）
 	const topbar = el('header', 'topbar');
 	const identity = el('div', 'identity');
 	const statusDot = el('span', 'status-dot');
@@ -221,16 +310,10 @@ function buildUi(root: HTMLElement): UiRefs {
 	statusDot.setAttribute('role', 'img');
 	const sessionTitle = el('span', 'session-title', '未连接');
 	identity.append(statusDot, sessionTitle);
-	const modelPill = el('span', 'model-pill');
-	modelPill.hidden = true;
 	const menuButton = button('⋯', '更多操作', 'icon-button menu-button');
 	menuButton.setAttribute('aria-haspopup', 'menu');
 	menuButton.setAttribute('aria-expanded', 'false');
-	const menu = el('div', 'menu');
-	menu.hidden = true;
-	menu.setAttribute('role', 'menu');
-	menu.setAttribute('aria-label', '更多操作');
-	topbar.append(identity, modelPill, menuButton, menu);
+	topbar.append(identity, menuButton);
 
 	// 历史会话下拉
 	const historyPanel = el('div', 'history-panel');
@@ -292,7 +375,7 @@ function buildUi(root: HTMLElement): UiRefs {
 	const permissionActions = el('div', 'permission-actions');
 	permission.append(permissionTitle, permissionMeta, permissionBody, permissionActions);
 
-	// 输入区：圆角容器，顶部自动上下文 chip，底部工具条
+	// 输入区：圆角卡片 = 上下文 chips + textarea + 单行工具栏（参考 DSH Web 输入区）。
 	const composer = el('div', 'composer');
 	const shell = el('div', 'composer-shell');
 	const autoContextBar = el('div', 'auto-context-bar');
@@ -302,42 +385,70 @@ function buildUi(root: HTMLElement): UiRefs {
 	chips.hidden = true;
 	const input = el('textarea', 'composer-input');
 	input.rows = 1;
-	input.placeholder = '给 DSH 发消息…';
+	input.placeholder = '给 DeepSeek Harness 发消息，/ 调用指令';
+	input.title = 'Enter 发送 · Shift+Enter 换行 · / 调用指令 · Esc 停止';
 	input.setAttribute('aria-label', '消息输入框');
-	const composerBar = el('div', 'composer-bar');
-	const btnPickContext = button('＋ 上下文', '把文件/文件夹加入上下文', 'ghost-button pick-context');
-	const selectors = el('div', 'composer-selectors');
-	const modelWrap = el('label', 'select-wrap');
-	modelWrap.hidden = true;
-	const modelSelect = el('select', 'select-input');
-	modelSelect.setAttribute('aria-label', '选择模型');
-	modelWrap.append(el('span', 'select-label', '模型'), modelSelect);
-	const reasoningWrap = el('label', 'select-wrap');
-	reasoningWrap.hidden = true;
-	const reasoningSelect = el('select', 'select-input');
-	reasoningSelect.setAttribute('aria-label', '选择推理强度');
-	reasoningWrap.append(el('span', 'select-label', '推理'), reasoningSelect);
-	selectors.append(modelWrap, reasoningWrap);
-	const btnSend = button('➤', '发送（Enter）', 'send-button');
-	composerBar.append(btnPickContext, selectors, btnSend);
-	const hint = el('div', 'composer-hint', 'Enter 发送 · Shift+Enter 换行 · Esc 停止');
-	shell.append(autoContextBar, chips, input, composerBar, hint);
-	composer.append(shell);
 
-	// 临时提示
+	const tools = el('div', 'composer-tools');
+	const toolsLeft = el('div', 'tools-left');
+	const toolsRight = el('div', 'tools-right');
+
+	// `+`：统一菜单入口（添加上下文 / 模式 / 审查 / 会话 / 更多）。
+	const btnPickContext = button('', '添加内容：上下文、模式、审查与会话操作', 'icon-button attach-button');
+	btnPickContext.append(icon('plus', 16));
+	btnPickContext.setAttribute('aria-haspopup', 'menu');
+	btnPickContext.setAttribute('aria-expanded', 'false');
+
+	// 模式徽标：只在计划/目标模式出现，点击打开「+」菜单切换模式。
+	const modeBadge = button('', '当前协作模式（点击切换）', 'mode-badge');
+	modeBadge.hidden = true;
+	modeBadge.setAttribute('aria-haspopup', 'menu');
+	modeBadge.setAttribute('aria-expanded', 'false');
+
+	// 权限 chip：显示当前预设 + ⌄，点击打开权限菜单（含自动审查行）。
+	const permissionChip = button('', '权限', 'chip permission-chip');
+	permissionChip.setAttribute('aria-haspopup', 'menu');
+	permissionChip.setAttribute('aria-expanded', 'false');
+
+	// 合并 chip：模型名 + 用量指示 + 推理档位 + ⌄（对应 DSH Web 的单个模型/推理入口）。
+	const modelChip = button('', '选择模型与推理等级', 'chip model-chip');
+	modelChip.setAttribute('aria-haspopup', 'menu');
+	modelChip.setAttribute('aria-expanded', 'false');
+
+	// 处理中：发送键仍然发送（排队），停止单独一个键，引导键把当前草稿插队发送。
+	const btnSteer = button('引导', '引导：不打断当前回复，插队优先发送', 'guide-button');
+	btnSteer.hidden = true;
+	const btnStop = button('■', '停止当前回复（Esc）', 'send-button stop-button');
+	btnStop.hidden = true;
+	const btnSend = button('↑', '发送（Enter）', 'send-button');
+	toolsLeft.append(btnPickContext, modeBadge, permissionChip);
+	toolsRight.append(modelChip, btnSteer, btnStop, btnSend);
+	tools.append(toolsLeft, toolsRight);
+
+	const hint = el('div', 'composer-hint');
+	hint.hidden = true;
+
+	// 操作提示：放在输入框正上方（正常文档流），不再悬浮遮挡底部信息。
 	const toast = el('div', 'toast');
 	toast.hidden = true;
 	toast.setAttribute('role', 'status');
 	toast.setAttribute('aria-live', 'polite');
 
-	root.append(topbar, historyPanel, banner, mainArea, permission, composer, toast);
+	// 排队插话：当前回复结束前提交的消息显示在这里（可转引导或取消）。
+	const pendingBar = el('div', 'pending-bar');
+	pendingBar.hidden = true;
+	pendingBar.setAttribute('role', 'list');
+	pendingBar.setAttribute('aria-label', '排队中的消息');
+
+	shell.append(autoContextBar, chips, input, tools, hint);
+	composer.append(toast, pendingBar, shell);
+
+	root.append(topbar, historyPanel, banner, mainArea, permission, composer);
 
 	return {
 		statusDot,
 		sessionTitle,
-		modelPill,
 		menuButton,
-		menu,
 		historyPanel,
 		banner,
 		bannerText,
@@ -364,11 +475,15 @@ function buildUi(root: HTMLElement): UiRefs {
 		chips,
 		input,
 		btnPickContext,
-		modelWrap,
-		modelSelect,
-		reasoningWrap,
-		reasoningSelect,
+		composerShell: shell,
+		composerHint: hint,
+		modeBadge,
+		permissionChip,
+		modelChip,
+		btnStop,
+		btnSteer,
 		btnSend,
+		pendingBar,
 		toast,
 	};
 }
@@ -483,24 +598,35 @@ function fallbackCopy(text: string): void {
 	}
 }
 
+/** 代码块标题栏的语言名：`code.className` 里的 `language-xxx`，缺省用 `code`。 */
+function codeLanguage(code: HTMLElement | null): string {
+	const className = code?.className ?? '';
+	const match = /(?:^|\s)language-([\w+#.-]+)/.exec(className);
+	return match?.[1] ?? 'code';
+}
+
+/**
+ * 给每个 `pre` 加一条标题栏：左侧语言名、右侧复制按钮。
+ * 旧实现把复制按钮绝对定位在代码块右上角，会挡住长代码首行，这里改成标题栏布局。
+ */
 function decorateMarkdown(container: HTMLElement): void {
-	for (const code of Array.from(container.querySelectorAll('pre > code'))) {
-		const pre = code.parentElement;
-		if (!pre) continue;
+	for (const pre of Array.from(container.querySelectorAll('pre'))) {
+		const code = pre.querySelector('code');
 		const wrapper = el('div', 'code-block');
-		pre.replaceWith(wrapper);
-		wrapper.append(pre);
-		const copyButton = button('复制', '复制代码');
-		copyButton.className = 'copy-button';
+		const head = el('div', 'code-head');
+		head.append(el('span', 'code-lang', codeLanguage(code)));
+		const copyButton = button('复制', '复制代码', 'copy-button');
 		copyButton.addEventListener('click', () => {
-			void copyText(code.textContent ?? '').then(() => {
+			void copyText(code?.textContent ?? '').then(() => {
 				copyButton.textContent = '已复制';
 				window.setTimeout(() => {
 					copyButton.textContent = '复制';
 				}, 1200);
 			});
 		});
-		wrapper.append(copyButton);
+		head.append(copyButton);
+		pre.replaceWith(wrapper);
+		wrapper.append(head, pre);
 	}
 }
 
@@ -596,13 +722,18 @@ interface ToolViewState {
 
 const toolViews = new Map<string, ToolViewState>();
 
+/** 超过这个时长的条目视为历史会话：没有实时起点，不能拿当前时间算耗时。 */
+const TOOL_HISTORY_MS = 12 * 3600 * 1000;
+
 function toolViewState(entry: ToolEntry): ToolViewState {
 	let view = toolViews.get(entry.id);
 	if (!view) {
-		view = { expanded: false, startedAt: typeof entry.at === 'number' ? entry.at : Date.now() };
+		view = { expanded: false };
+		const at = typeof entry.at === 'number' ? entry.at : undefined;
+		// 历史会话恢复出来的工具条目没有实时起点，记录 startedAt 会得到「耗时 2 天」。
+		if (at !== undefined && Date.now() - at <= TOOL_HISTORY_MS) view.startedAt = at;
 		toolViews.set(entry.id, view);
 	}
-	if (view.startedAt === undefined) view.startedAt = entry.at;
 	if (
 		(entry.status === 'completed' || entry.status === 'failed') &&
 		view.durationMs === undefined &&
@@ -624,7 +755,13 @@ function toolDurationLabel(view: ToolViewState): string {
 
 function refsRow(refsList: readonly ContextRef[]): HTMLElement {
 	const row = el('div', 'ref-row');
-	for (const ref of refsList) row.append(el('span', 'ref-chip', ref.name));
+	for (const ref of refsList) {
+		const chip = el('span', 'ref-chip');
+		if (ref.kind === 'image') chip.append(el('span', 'ref-chip-kind', '图'));
+		chip.append(el('span', 'ref-chip-name', ref.name));
+		chip.title = ref.kind === 'image' ? `图片 · ${ref.uri}` : ref.uri;
+		row.append(chip);
+	}
 	return row;
 }
 
@@ -641,6 +778,7 @@ function createUserEntry(entry: Extract<TranscriptEntry, { kind: 'user' }>): HTM
 function createAssistantEntry(entry: Extract<TranscriptEntry, { kind: 'assistant' }>): HTMLElement {
 	const node = el('div', 'entry entry-assistant');
 	node.dataset.entryId = entry.id;
+	const content = stripFindingsBlock(entry.text);
 	const roleRow = el('div', 'role-row');
 	roleRow.append(el('span', 'role-name', 'DSH'));
 	if (entry.streaming === true) roleRow.append(el('span', 'role-streaming', '生成中…'));
@@ -648,7 +786,7 @@ function createAssistantEntry(entry: Extract<TranscriptEntry, { kind: 'assistant
 	if (time) roleRow.append(el('span', 'hover-meta', time));
 	const copy = button('复制', '复制这条回答', 'copy-answer');
 	copy.addEventListener('click', () => {
-		void copyText(entry.text).then(() => {
+		void copyText(content.text).then(() => {
 			copy.textContent = '已复制';
 			window.setTimeout(() => {
 				copy.textContent = '复制';
@@ -656,7 +794,10 @@ function createAssistantEntry(entry: Extract<TranscriptEntry, { kind: 'assistant
 		});
 	});
 	roleRow.append(copy);
-	node.append(roleRow, markdownBody(entry.text, entry.streaming === true));
+	node.append(roleRow, markdownBody(content.text, entry.streaming === true));
+	if (content.stripped) {
+		node.append(el('div', 'answer-footnote', '审查发现已提取到下方「审查结果」'));
+	}
 	return node;
 }
 
@@ -828,8 +969,88 @@ function upsertEntry(entry: TranscriptEntry, fresh = false): void {
 }
 
 // ---------------------------------------------------------------------------
-// 空状态：品牌 + 4 个快捷动作 + 最近 3 个会话
+// 空状态：词标 + 黑底白鲸 + 状态行 + 文字链接
 // ---------------------------------------------------------------------------
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/** 启动页黑底方块里的官方白鲸 logo（DSH FISH_LOGO_PATH，23.16×17.04）。 */
+function whaleMark(): SVGSVGElement {
+	const svg = document.createElementNS(SVG_NS, 'svg');
+	svg.setAttribute('viewBox', `0 0 ${FISH_LOGO_VIEWBOX.width} ${FISH_LOGO_VIEWBOX.height}`);
+	svg.setAttribute('width', '56');
+	svg.setAttribute('height', String((56 * FISH_LOGO_VIEWBOX.height) / FISH_LOGO_VIEWBOX.width));
+	svg.setAttribute('fill', 'currentColor');
+	svg.setAttribute('aria-hidden', 'true');
+	svg.setAttribute('focusable', 'false');
+	const path = document.createElementNS(SVG_NS, 'path');
+	path.setAttribute('d', FISH_LOGO_PATH);
+	svg.append(path);
+	return svg;
+}
+
+/**
+ * 官方横向 wordmark（只显示 "deepseek" + HARNESS 徽标，不重复鲸鱼）。
+ *
+ * 图形来自 `@deepseek-ai/dsh-client-ui-primitives` 的 BrandWordmark：字母用
+ * currentColor；HARNESS 徽标底为 currentColor、字母用启动页背景色（CSS
+ * `.brand-badge-letter`），与官方深/浅主题一致。
+ */
+function brandWordmark(): SVGSVGElement {
+	const width = (26 * 156) / 24;
+	const svg = document.createElementNS(SVG_NS, 'svg');
+	svg.setAttribute('viewBox', WORDMARK_TEXT_VIEWBOX);
+	svg.setAttribute('width', String(width));
+	svg.setAttribute('height', '26');
+	svg.setAttribute('fill', 'none');
+	svg.setAttribute('aria-hidden', 'true');
+	svg.setAttribute('focusable', 'false');
+
+	for (const data of WORDMARK_LETTERS) {
+		const path = document.createElementNS(SVG_NS, 'path');
+		path.setAttribute('d', data);
+		path.setAttribute('fill', 'currentColor');
+		svg.append(path);
+	}
+
+	const badge = document.createElementNS(SVG_NS, 'rect');
+	badge.setAttribute('x', String(WORDMARK_BADGE.x));
+	badge.setAttribute('y', String(WORDMARK_BADGE.y));
+	badge.setAttribute('width', String(WORDMARK_BADGE.width));
+	badge.setAttribute('height', String(WORDMARK_BADGE.height));
+	badge.setAttribute('rx', String(WORDMARK_BADGE.rx));
+	badge.setAttribute('fill', 'currentColor');
+	svg.append(badge);
+
+	const clipId = 'dsh-brand-badge-clip';
+	const defs = document.createElementNS(SVG_NS, 'defs');
+	const clip = document.createElementNS(SVG_NS, 'clipPath');
+	clip.setAttribute('id', clipId);
+	const clipRect = document.createElementNS(SVG_NS, 'rect');
+	clipRect.setAttribute('width', String(WORDMARK_BADGE_CLIP.width));
+	clipRect.setAttribute('height', String(WORDMARK_BADGE_CLIP.height));
+	clipRect.setAttribute('x', String(WORDMARK_BADGE_CLIP.x));
+	clipRect.setAttribute('y', String(WORDMARK_BADGE_CLIP.y));
+	clipRect.setAttribute(
+		'transform',
+		`translate(${WORDMARK_BADGE_CLIP.translateX} ${WORDMARK_BADGE_CLIP.translateY})`,
+	);
+	clipRect.setAttribute('fill', 'white');
+	clip.append(clipRect);
+	defs.append(clip);
+	svg.append(defs);
+
+	const letters = document.createElementNS(SVG_NS, 'g');
+	letters.setAttribute('clip-path', `url(#${clipId})`);
+	for (const data of WORDMARK_BADGE_LETTERS) {
+		const path = document.createElementNS(SVG_NS, 'path');
+		path.setAttribute('d', data);
+		path.setAttribute('class', 'brand-badge-letter');
+		letters.append(path);
+	}
+	svg.append(letters);
+	return svg;
+}
 
 function emptyStatusText(phase: RuntimePhase, error: string | undefined): string {
 	switch (phase) {
@@ -844,50 +1065,107 @@ function emptyStatusText(phase: RuntimePhase, error: string | undefined): string
 	}
 }
 
-function renderEmptyState(): void {
+/** 启动页退场动画时长（与 style.css 的 `.empty-state.is-leaving` 对齐）。 */
+const LAUNCH_EXIT_MS = 160;
+
+let launchVisible = false;
+let launchHideTimer: number | undefined;
+let launchStatusNode: HTMLDivElement | undefined;
+
+/** 重建启动页内容（白鲸 + 词标 + 状态行 + 快捷链接）。 */
+function buildLaunchContent(): void {
 	const empty = refs.emptyState;
-	if (state.ui.transcript.length > 0) {
-		empty.hidden = true;
-		empty.replaceChildren();
+	empty.replaceChildren();
+	const { runtime } = state.ui;
+
+	const launch = el('div', 'launch');
+	// 图标在上、文字在下；鲸鱼不再套黑底方块，避免和主题背景产生色差。
+	const mark = el('div', 'launch-mark');
+	mark.append(whaleMark());
+	launch.append(mark);
+	const wordmark = el('div', 'launch-wordmark');
+	wordmark.setAttribute('role', 'img');
+	wordmark.setAttribute('aria-label', 'DeepSeek Harness');
+	wordmark.append(brandWordmark());
+	launch.append(wordmark);
+	launchStatusNode = el('div', 'launch-status', emptyStatusText(runtime.phase, runtime.error));
+	launch.append(launchStatusNode);
+
+	const links = el('div', 'launch-links');
+	links.append(
+		actionButton(
+			'审查当前文件',
+			'审查当前编辑器里的文件',
+			() => post({ type: 'runCommand', command: 'reviewFile' }),
+			'link-button',
+		),
+		actionButton(
+			'审查改动',
+			'审查工作区未提交的改动',
+			() => post({ type: 'runCommand', command: 'reviewChanges' }),
+			'link-button',
+		),
+		actionButton(
+			'解释选区',
+			'解释当前选中的代码',
+			() => post({ type: 'runCommand', command: 'explainSelection' }),
+			'link-button',
+		),
+		actionButton('新建会话', '新建一个 DSH 会话', () => post({ type: 'newSession' }), 'link-button'),
+	);
+	launch.append(links);
+	empty.append(launch);
+}
+
+function updateLaunchStatus(): void {
+	if (!launchStatusNode) return;
+	launchStatusNode.textContent = emptyStatusText(state.ui.runtime.phase, state.ui.runtime.error);
+}
+
+/** 淡入启动页；已显示时只刷新状态行，避免每次 state 推送都重播动画。 */
+function showLaunch(): void {
+	const empty = refs.emptyState;
+	if (launchHideTimer !== undefined) {
+		window.clearTimeout(launchHideTimer);
+		launchHideTimer = undefined;
+	}
+	empty.classList.remove('is-leaving');
+	if (launchVisible) {
+		empty.classList.add('is-visible');
+		updateLaunchStatus();
 		return;
 	}
+	buildLaunchContent();
 	empty.hidden = false;
-	empty.replaceChildren();
-	const { runtime, history } = state.ui;
+	// 强制 reflow，让刚取消隐藏的节点从初始 opacity/transform 开始过渡。
+	void empty.offsetWidth;
+	empty.classList.add('is-visible');
+	launchVisible = true;
+}
 
-	const brand = el('div', 'empty-brand');
-	brand.append(el('div', 'empty-logo', '◈'));
-	brand.append(el('div', 'empty-title', 'DeepSeek Harness'));
-	brand.append(el('div', 'empty-subtitle', '代码审查与对话，都在侧边栏里完成。'));
-	empty.append(brand);
+/** 淡出启动页后隐藏；重复调用不会重启计时，避免快速切换时闪烁。 */
+function hideLaunch(): void {
+	if (!launchVisible || launchHideTimer !== undefined) return;
+	const empty = refs.emptyState;
+	empty.classList.remove('is-visible');
+	empty.classList.add('is-leaving');
+	launchHideTimer = window.setTimeout(() => {
+		launchHideTimer = undefined;
+		empty.hidden = true;
+		empty.replaceChildren();
+		empty.classList.remove('is-leaving');
+		launchStatusNode = undefined;
+		launchVisible = false;
+	}, LAUNCH_EXIT_MS);
+}
 
-	empty.append(el('div', 'empty-status', emptyStatusText(runtime.phase, runtime.error)));
-
-	const actions = el('div', 'empty-actions');
-	actions.append(
-		actionButton('审查当前文件', '审查当前编辑器里的文件', () => post({ type: 'runCommand', command: 'reviewFile' }), 'empty-action'),
-		actionButton('审查改动', '审查工作区未提交的改动', () => post({ type: 'runCommand', command: 'reviewChanges' }), 'empty-action'),
-		actionButton('解释选区', '解释当前选中的代码', () => post({ type: 'runCommand', command: 'explainSelection' }), 'empty-action'),
-		actionButton('新建会话', '新建一个 DSH 会话', () => post({ type: 'newSession' }), 'empty-action'),
-	);
-	empty.append(actions);
-
-	const recent = history.slice(0, 3);
-	if (recent.length > 0) {
-		const recentBox = el('div', 'empty-recent');
-		recentBox.append(el('div', 'empty-recent-title', '最近会话'));
-		for (const info of recent) {
-			const item = button('', `恢复会话 ${info.sessionId}`, 'empty-recent-item');
-			item.append(el('span', 'empty-recent-name', truncateTitle(info.title || info.sessionId, 32)));
-			const relative = formatRelativeTime(info.updatedAt);
-			item.append(el('span', 'empty-recent-meta', relative || info.cwd));
-			item.addEventListener('click', () => {
-				post({ type: 'resumeSession', sessionId: info.sessionId });
-			});
-			recentBox.append(item);
-		}
-		empty.append(recentBox);
-	}
+/**
+ * 空会话才显示启动页。只含 notice 的会话（如「已新建会话。」或运行时报错）
+ * 仍算空会话，否则新建会话后鲸鱼启动页会被提示条挤掉。
+ */
+function renderEmptyState(): void {
+	if (shouldShowLaunch(state.ui.transcript)) showLaunch();
+	else hideLaunch();
 }
 
 // ---------------------------------------------------------------------------
@@ -954,65 +1232,607 @@ function renderFindings(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 模型/推理 select、上下文 chips、自动上下文 chip
+// 输入区 chips / 统一菜单入口
 // ---------------------------------------------------------------------------
 
-function optionElement(value: ConfigOptionValue, current: string): HTMLOptionElement {
-	const option = el('option', undefined, value.name);
-	option.value = value.value;
-	if (value.value === current) option.selected = true;
-	if (value.description) option.title = value.description;
-	return option;
+function reasoningOption(): ConfigOption | undefined {
+	return findConfigOption(state.ui.configOptions, 'reasoning');
 }
 
-function renderSelect(
-	wrapper: HTMLLabelElement,
-	select: HTMLSelectElement,
-	option: ConfigOption | undefined,
-): void {
-	select.replaceChildren();
-	if (!option || option.values.length === 0) {
-		wrapper.hidden = true;
-		delete select.dataset.configId;
-		return;
-	}
-	wrapper.hidden = false;
-	wrapper.title = option.name;
-	select.dataset.configId = option.id;
+function reasoningIndex(option: ConfigOption): number {
 	const current = currentConfigValue(option);
-	const groups = new Map<string, { label: string; values: ConfigOptionValue[] }>();
-	for (const value of option.values) {
-		const key = value.group ?? '';
-		const group = groups.get(key) ?? { label: value.groupName ?? '', values: [] };
-		group.values.push(value);
-		groups.set(key, group);
-	}
-	for (const group of groups.values()) {
-		if (group.label) {
-			const optgroup = el('optgroup');
-			optgroup.label = group.label;
-			for (const value of group.values) optgroup.append(optionElement(value, current));
-			select.append(optgroup);
-		} else {
-			for (const value of group.values) select.append(optionElement(value, current));
+	const index = option.values.findIndex((value) => value.value === current);
+	return index < 0 ? 0 : index;
+}
+
+function renderComposerHint(): void {
+	const base = composerHintText({
+		mode: state.ui.mode,
+		autoReview: state.ui.autoReview,
+		permissionMode: state.ui.permissionMode,
+	});
+	const busyHint = state.ui.busy ? '正在回复：Enter 排队，Ctrl+Enter 引导（不打断当前回复）' : '';
+	const text = [base, busyHint].filter((part) => part.length > 0).join(' · ');
+	refs.composerHint.textContent = text;
+	refs.composerHint.hidden = text.length === 0;
+}
+
+/** 模式徽标：只在计划/目标模式显示，点击打开「+」菜单。 */
+function renderModeBadge(): void {
+	const mode = state.ui.mode;
+	refs.modeBadge.hidden = mode === 'agent';
+	refs.modeBadge.textContent = modeLabel(mode);
+	refs.modeBadge.classList.add('is-warning');
+	refs.modeBadge.title =
+		mode === 'plan'
+			? '计划模式：只读分析，不修改文件（点击切换模式）'
+			: '目标模式：跨轮次追踪完成目标（点击切换模式）';
+	refs.modeBadge.setAttribute('aria-label', `协作模式：${modeLabel(mode)}`);
+}
+
+/** 权限 chip：当前预设 + ⌄；完全权限用 danger 色，计划模式用 warning 色。 */
+function renderPermissionChip(): void {
+	const mode = state.ui.permissionMode;
+	const plan = state.ui.mode === 'plan';
+	refs.permissionChip.textContent = `${permissionLabel(mode)} ⌄`;
+	refs.permissionChip.classList.toggle('is-danger', mode === 'danger-full-access');
+	refs.permissionChip.classList.toggle('is-warning', plan);
+	refs.permissionChip.title = plan
+		? '计划模式下写入请求会被拒绝（点击查看权限菜单）'
+		: `${permissionDescription(mode)}（${permissionHint(mode)}）`;
+	refs.permissionChip.setAttribute('aria-label', `权限：${permissionLabel(mode)}`);
+	refs.composerShell.classList.toggle('mode-plan', plan);
+}
+
+/**
+ * 合并 chip：模型名 + 上下文用量（环/百分比，缺 size 时退回 token 数）+ 推理档位 + ⌄。
+ * 未就绪时显示占位文案，仍可打开菜单看空状态。
+ */
+function renderModelChip(): void {
+	const option = findConfigOption(state.ui.configOptions, 'model');
+	const current = currentConfigValue(option);
+	const ready = option !== undefined && option.values.length > 0;
+	const currentName = ready ? option?.values.find((value) => value.value === current)?.name : undefined;
+	const modelLabel = ready ? (currentName ?? current) : '模型…';
+	const children: HTMLElement[] = [el('span', 'chip-label', modelLabel)];
+
+	const usage = state.ui.usage;
+	const percent = contextUsagePercent(usage);
+	if (percent !== undefined) {
+		const indicator = el('span', 'usage-indicator');
+		indicator.classList.toggle('is-high', percent > 90);
+		const ring = el('span', 'usage-ring');
+		ring.style.setProperty('--usage-percent', String(percent));
+		indicator.append(ring, el('span', 'usage-percent', `${percent}%`));
+		const detail = formatUsageText(usage);
+		indicator.title = detail ? `${detail} · 上下文 ${percent}%` : `上下文用量 ${percent}%`;
+		indicator.setAttribute('aria-label', `上下文用量 ${percent}%`);
+		children.push(indicator);
+	} else {
+		const tokenText = usageBadgeText(usage);
+		if (tokenText.length > 0) {
+			const badge = el('span', 'usage-badge', tokenText);
+			badge.title = formatUsageText(usage) || '上下文用量';
+			children.push(badge);
 		}
 	}
-	select.value = current;
-	if (select.selectedIndex < 0 && select.options.length > 0) select.selectedIndex = 0;
+
+	const reasoning = reasoningOption();
+	const effortVisible = reasoning !== undefined && reasoning.values.length > 1;
+	const effortValue = effortVisible && reasoning ? reasoning.values[reasoningIndex(reasoning)] : undefined;
+	if (effortValue) children.push(el('span', 'chip-effort', reasoningChipLabel(effortValue.name, effortValue.value)));
+
+	children.push(el('span', 'chip-caret', '⌄'));
+	refs.modelChip.replaceChildren(...children);
+	refs.modelChip.classList.toggle('is-muted', !ready);
+
+	const effortLabel = effortValue ? reasoningChipLabel(effortValue.name, effortValue.value) : undefined;
+	refs.modelChip.title = !ready
+		? '模型列表尚未就绪'
+		: effortLabel
+			? `模型：${modelLabel} · 推理：${effortLabel}（点击调整）`
+			: `模型：${modelLabel}（点击切换）`;
+	refs.modelChip.setAttribute(
+		'aria-label',
+		ready ? `模型与推理：${modelLabel}${effortLabel ? `，推理 ${effortLabel}` : ''}` : '模型列表尚未就绪',
+	);
 }
 
-function renderConfigOptions(): void {
-	const options = state.ui.configOptions;
-	renderSelect(refs.modelWrap, refs.modelSelect, findConfigOption(options, 'model'));
-	renderSelect(refs.reasoningWrap, refs.reasoningSelect, findConfigOption(options, 'reasoning'));
+// ---------------------------------------------------------------------------
+// 统一菜单：+ / 权限 / 模型 / 推理 / 顶部 ⋯（都走 menu.ts 的单例 popover）
+// ---------------------------------------------------------------------------
+
+/** 打开普通菜单前先收起斜杠面板，保证 `slashPaletteOpen` 与真实 DOM 一致。 */
+function openComposerMenu(
+	anchor: HTMLElement,
+	entries: MenuEntry[],
+	options: {
+		title?: string;
+		align?: 'left' | 'right';
+		keyboard?: 'menu' | 'anchor';
+		onPick?: (id: string) => void;
+	} = {},
+): void {
+	slashPaletteOpen = false;
+	openPopoverMenu(anchor, entries, options);
 }
 
-function handleConfigChange(select: HTMLSelectElement): void {
-	const configId = select.dataset.configId;
-	const value = select.value;
-	if (!configId || value.length === 0) return;
-	// 不直接改 configOptions.currentValue：那是扩展侧对象，等扩展回传 configOptions 再刷新。
-	post({ type: 'setConfig', configId, value });
+/** 切换协作模式（与当前相同则只提示，不发消息）。 */
+function setSessionMode(target: SessionMode): void {
+	if (state.ui.mode === target) {
+		showToast('info', target === 'agent' ? '已在自动模式' : `已在${modeLabel(target)}模式`);
+		return;
+	}
+	state.ui.mode = target;
+	post({ type: 'setMode', mode: target });
+	renderModeBadge();
+	renderPermissionChip();
+	renderComposerHint();
+	showToast('info', target === 'agent' ? '已回到自动模式' : `已进入${modeLabel(target)}模式`);
+}
+
+/** 「+」菜单：添加上下文 / 模式 / 审查 / 会话 / 更多。 */
+function openPlusMenu(anchor: HTMLElement = refs.btnPickContext): void {
+	const entries: MenuEntry[] = [
+		{
+			kind: 'section',
+			label: '添加上下文',
+			items: [{ id: 'attach', label: '选择文件或文件夹…', hint: 'file', description: '加入下一条消息' }],
+		},
+		{
+			kind: 'section',
+			label: '模式',
+			items: modeMenuItems(state.ui.mode).map((item) => ({ ...item, id: `mode:${item.id}` })),
+		},
+		{
+			kind: 'section',
+			label: '审查',
+			items: [
+				{ id: 'review-file', label: '审查当前文件', hint: 'review', description: '检查当前编辑器里的文件' },
+				{ id: 'review-changes', label: '审查改动', hint: 'diff', description: '审查工作区未提交的改动' },
+				{ id: 'explain-selection', label: '解释选区', hint: 'explain', description: '解释当前选中的代码' },
+			],
+		},
+		{
+			kind: 'section',
+			label: '会话',
+			items: [
+				{ id: 'new-session', label: '新建会话', hint: 'new' },
+				{ id: 'history', label: '会话历史', hint: 'history' },
+				{ id: 'turn-changes', label: '本轮改动', hint: 'diff' },
+				{ id: 'clear-findings', label: '清除审查结果', hint: 'clear' },
+			],
+		},
+		{
+			kind: 'section',
+			label: '更多',
+			items: [
+				{ id: 'diagnose', label: '兼容性诊断', hint: 'diagnose' },
+				{ id: 'settings', label: '打开设置', hint: 'settings' },
+				{ id: 'restart', label: '重启运行时', hint: 'restart' },
+			],
+		},
+	];
+	openComposerMenu(anchor, entries, {
+		title: '添加内容',
+		align: 'left',
+		onPick: (id) => {
+			if (id.startsWith('mode:')) {
+				setSessionMode(normalizeMode(id.slice('mode:'.length)));
+				return;
+			}
+			switch (id) {
+				case 'attach':
+					post({ type: 'pickContext' });
+					break;
+				case 'review-file':
+					post({ type: 'runCommand', command: 'reviewFile' });
+					break;
+				case 'review-changes':
+					post({ type: 'runCommand', command: 'reviewChanges' });
+					break;
+				case 'explain-selection':
+					post({ type: 'runCommand', command: 'explainSelection' });
+					break;
+				case 'new-session':
+					post({ type: 'newSession' });
+					break;
+				case 'history':
+					toggleHistoryPanel();
+					break;
+				case 'turn-changes':
+					post({ type: 'runCommand', command: 'showTurnChanges' });
+					break;
+				case 'clear-findings':
+					post({ type: 'clearFindings' });
+					break;
+				case 'diagnose':
+					post({ type: 'runCommand', command: 'diagnose' });
+					break;
+				case 'settings':
+					post({ type: 'openSettings' });
+					break;
+				case 'restart':
+					post({ type: 'restartRuntime' });
+					break;
+				default:
+					break;
+			}
+		},
+	});
+}
+
+/** 权限菜单：三个预设 + 自动审查行；每次打开时按当前 state 重建勾选状态。 */
+function openPermissionMenu(): void {
+	const entries: MenuEntry[] = [
+		{
+			kind: 'section',
+			label: '权限',
+			items: permissionMenuItems(state.ui.permissionMode, {
+				planMode: state.ui.mode === 'plan',
+				autoReview: state.ui.autoReview,
+			}),
+		},
+	];
+	openComposerMenu(refs.permissionChip, entries, {
+		title: '权限',
+		align: 'left',
+		onPick: (id) => {
+			if (id === 'auto-review') {
+				post({ type: 'setAutoReview', enabled: !state.ui.autoReview });
+				return;
+			}
+			post({ type: 'setPermissionMode', mode: normalizePermissionMode(id) });
+		},
+	});
+}
+
+/**
+ * 合并入口的摘要面板：两行「模型 … ›」「推理等级 … ›」，与 DSH Web 的输入区
+ * 二级菜单一致；选中后进入模型列表 / 推理滑块，子面板都带「← 返回」。
+ */
+function openModelPanelMenu(): void {
+	const option = findConfigOption(state.ui.configOptions, 'model');
+	const current = currentConfigValue(option);
+	const ready = option !== undefined && option.values.length > 0;
+	const modelName = ready ? (option?.values.find((value) => value.value === current)?.name ?? current) : '尚未就绪';
+	const reasoning = reasoningOption();
+	const effortVisible = reasoning !== undefined && reasoning.values.length > 1;
+	const effortName = effortVisible && reasoning ? reasoning.values[reasoningIndex(reasoning)]?.name : undefined;
+	const entries: MenuEntry[] = [
+		{
+			kind: 'section',
+			label: '',
+			items: [
+				{ id: 'model', label: '模型', hint: 'model', description: `${modelName} ›` },
+				{
+					id: 'effort',
+					label: '推理等级',
+					hint: 'reasoning',
+					description: effortVisible ? `${effortName ?? '默认'} ›` : '不可用',
+					disabled: !effortVisible,
+				},
+			],
+		},
+	];
+	openComposerMenu(refs.modelChip, entries, {
+		align: 'right',
+		onPick: (id) => {
+			if (id === 'model') openModelListMenu();
+			else if (id === 'effort') openReasoningMenu();
+		},
+	});
+}
+
+/** 模型列表子面板：顶部「← 返回」，其余按服务端分组、当前模型勾选。 */
+function openModelListMenu(): void {
+	const option = findConfigOption(state.ui.configOptions, 'model');
+	const current = currentConfigValue(option);
+	const entries: MenuEntry[] = [
+		{ kind: 'section', label: '', items: [{ id: '__back', label: '← 返回', hint: 'back' }] },
+		...modelMenuGroups(option, current).map((group) => ({
+			kind: 'section' as const,
+			label: group.title ?? '',
+			items: group.items,
+		})),
+	];
+	openComposerMenu(refs.modelChip, entries, {
+		title: '模型',
+		align: 'right',
+		onPick: (id) => {
+			if (id === '__back') {
+				openModelPanelMenu();
+				return;
+			}
+			if (!option || id === '__empty') return;
+			post({ type: 'setConfig', configId: option.id, value: id });
+		},
+	});
+}
+
+/** 推理等级子面板：顶部「← 返回」+ 单条 range 滑块，`change` 时提交一次 setConfig。 */
+function openReasoningMenu(): void {
+	const option = reasoningOption();
+	if (!option || option.values.length <= 1) {
+		openModelPanelMenu();
+		return;
+	}
+	const entries: MenuEntry[] = [
+		{ kind: 'section', label: '', items: [{ id: '__back', label: '← 返回', hint: 'back' }] },
+		{
+			kind: 'slider',
+			id: option.id,
+			label: '推理等级',
+			ticks: option.values.map((value) => value.name),
+			value: reasoningIndex(option),
+			onChange: (index) => {
+				const value = option.values[index];
+				if (!value) return;
+				post({ type: 'setConfig', configId: option.id, value: value.value });
+			},
+		},
+	];
+	openComposerMenu(refs.modelChip, entries, {
+		title: '推理等级',
+		align: 'right',
+		onPick: (id) => {
+			if (id === '__back') openModelPanelMenu();
+		},
+	});
+}
+
+/** 字号子面板：`⋯` 菜单 →「显示 / 字号」，松手即时写设置并应用。 */
+function openFontScaleMenu(): void {
+	const entries: MenuEntry[] = [
+		{ kind: 'section', label: '', items: [{ id: '__back', label: '← 返回', hint: 'back' }] },
+		{
+			kind: 'slider',
+			id: 'font-scale',
+			label: '字号',
+			ticks: ['80%', '100%', '120%', '140%', '160%', '180%'],
+			value: fontScaleIndex(state.ui.fontScale),
+			onChange: (index) => {
+				const scale = FONT_SCALES[index];
+				if (scale === undefined) return;
+				state.ui.fontScale = scale;
+				applyFontScale(scale);
+				post({ type: 'setFontScale', value: scale });
+			},
+		},
+	];
+	openComposerMenu(refs.menuButton, entries, {
+		title: '字号',
+		align: 'right',
+		onPick: (id) => {
+			if (id === '__back') openTopbarMenu();
+		},
+	});
+}
+
+/** 顶部「⋯」菜单：显示（字号）/ 会话 / 审查 / 更多。 */
+function openTopbarMenu(): void {
+	const entries: MenuEntry[] = [
+		{
+			kind: 'section',
+			label: '显示',
+			items: [
+				{
+					id: 'font-size',
+					label: '字号',
+					hint: 'font size',
+					description: `${fontScalePercent(state.ui.fontScale)} ›`,
+				},
+			],
+		},
+		{
+			kind: 'section',
+			label: '会话',
+			items: [
+				{ id: 'new-session', label: '新建会话', hint: 'new' },
+				{ id: 'history', label: '会话历史', hint: 'history' },
+				{ id: 'turn-changes', label: '本轮改动', hint: 'diff' },
+			],
+		},
+		{
+			kind: 'section',
+			label: '审查',
+			items: [{ id: 'clear-findings', label: '清除审查结果', hint: 'clear' }],
+		},
+		{
+			kind: 'section',
+			label: '更多',
+			items: [
+				{ id: 'diagnose', label: '兼容性诊断', hint: 'diagnose' },
+				{ id: 'settings', label: '打开设置', hint: 'settings' },
+				{ id: 'restart', label: '重启运行时', hint: 'restart' },
+			],
+		},
+	];
+	openComposerMenu(refs.menuButton, entries, {
+		align: 'right',
+		onPick: (id) => {
+			switch (id) {
+				case 'font-size':
+					openFontScaleMenu();
+					break;
+				case 'new-session':
+					post({ type: 'newSession' });
+					break;
+				case 'history':
+					toggleHistoryPanel();
+					break;
+				case 'turn-changes':
+					post({ type: 'runCommand', command: 'showTurnChanges' });
+					break;
+				case 'clear-findings':
+					post({ type: 'clearFindings' });
+					break;
+				case 'diagnose':
+					post({ type: 'runCommand', command: 'diagnose' });
+					break;
+				case 'settings':
+					post({ type: 'openSettings' });
+					break;
+				case 'restart':
+					post({ type: 'restartRuntime' });
+					break;
+				default:
+					break;
+			}
+		},
+	});
+}
+
+// ---------------------------------------------------------------------------
+// 斜杠指令面板 + 本地执行
+// ---------------------------------------------------------------------------
+
+/** 当前是否有斜杠面板（区别于其他 popover：只有它使用 `keyboard:'anchor'`）。 */
+let slashPaletteOpen = false;
+let slashPaletteIds: string[] = [];
+let slashPaletteIndex = 0;
+
+/** 模式类指令 → 目标模式。 */
+const MODE_COMMAND_TARGETS: Readonly<Record<string, SessionMode>> = {
+	plan: 'plan',
+	'plan-off': 'agent',
+	goal: 'goal',
+	'goal-off': 'agent',
+	auto: 'agent',
+};
+
+function slashMenuItems(commands: readonly SlashCommand[]): MenuItemModel[] {
+	return commands.map((command) => ({
+		id: command.id,
+		label: command.usage,
+		hint: command.label,
+		description: command.description,
+	}));
+}
+
+/** 打开斜杠面板（anchor 键盘模式：焦点留在 textarea，高亮由 main.ts 控制）。 */
+function openSlashPalette(matches: SlashCommand[]): void {
+	if (matches.length === 0) {
+		closeSlashPalette();
+		return;
+	}
+	slashPaletteIds = matches.map((command) => command.id);
+	slashPaletteIndex = 0;
+	openPopoverMenu(
+		refs.input,
+		[{ kind: 'section', label: '指令', items: slashMenuItems(matches) }],
+		{
+			keyboard: 'anchor',
+			align: 'left',
+			onPick: (id) => runSlashCommand(id),
+			onClose: () => {
+				slashPaletteOpen = false;
+			},
+		},
+	);
+	slashPaletteOpen = true;
+	highlightPopoverItem(slashPaletteIds[0] ?? '');
+}
+
+function closeSlashPalette(): void {
+	if (!slashPaletteOpen) return;
+	slashPaletteOpen = false;
+	closePopoverMenu();
+}
+
+/** 输入变化：`/` 开头且还没构成完整指令时重建面板，否则关闭。 */
+function syncSlashPalette(): void {
+	const value = refs.input.value;
+	if (!shouldShowSlashPalette(value)) {
+		closeSlashPalette();
+		return;
+	}
+	const matches = matchSlashCommands(value);
+	if (matches.length === 0) {
+		closeSlashPalette();
+		return;
+	}
+	openSlashPalette(matches);
+}
+
+function moveSlashHighlight(direction: 1 | -1): void {
+	const count = slashPaletteIds.length;
+	if (count === 0) return;
+	slashPaletteIndex = (slashPaletteIndex + direction + count) % count;
+	highlightPopoverItem(slashPaletteIds[slashPaletteIndex] ?? '');
+}
+
+/** 只读指令帮助：选中后把 usage 填回输入框，不执行。 */
+function openHelpMenu(): void {
+	openComposerMenu(
+		refs.input,
+		[{ kind: 'section', label: '全部指令', items: slashMenuItems(SLASH_COMMANDS) }],
+		{
+			title: '斜杠指令',
+			keyboard: 'menu',
+			align: 'left',
+			onPick: (id) => {
+				const command = SLASH_COMMANDS.find((item) => item.id === id);
+				if (!command) return;
+				refs.input.value = command.usage;
+				autoSizeInput();
+				refs.input.focus();
+			},
+		},
+	);
+}
+
+/** 执行一条斜杠指令：先清空输入/关闭面板，再按 id 分派到 post(...) 或本地动作。 */
+function runSlashCommand(id: string): void {
+	closeSlashPalette();
+	closePopoverMenu();
+	refs.input.value = '';
+	autoSizeInput();
+
+	const targetMode = MODE_COMMAND_TARGETS[id];
+	if (targetMode) {
+		setSessionMode(targetMode);
+		refs.input.focus();
+		return;
+	}
+
+	switch (id) {
+		case 'new':
+			post({ type: 'newSession' });
+			showToast('info', '已新建会话');
+			break;
+		case 'history':
+			toggleHistoryPanel();
+			break;
+		case 'review':
+			post({ type: 'runCommand', command: 'reviewFile' });
+			showToast('info', '正在审查当前文件…');
+			break;
+		case 'clear':
+			post({ type: 'clearFindings' });
+			showToast('info', '已清除审查结果');
+			break;
+		case 'permission':
+			openPermissionMenu();
+			return;
+		case 'model':
+			openModelPanelMenu();
+			return;
+		case 'diagnose':
+			post({ type: 'runCommand', command: 'diagnose' });
+			showToast('info', '正在生成兼容性诊断…');
+			break;
+		case 'settings':
+			post({ type: 'openSettings' });
+			break;
+		case 'help':
+			openHelpMenu();
+			return;
+		default:
+			showToast('warn', `未知指令：/${id}`);
+			return;
+	}
+	refs.input.focus();
 }
 
 function renderContextChips(): void {
@@ -1024,7 +1844,9 @@ function renderContextChips(): void {
 	refs.chips.hidden = false;
 	for (const [index, ref] of state.draftRefs.entries()) {
 		const chip = el('span', 'context-chip');
+		if (ref.kind === 'image') chip.append(el('span', 'context-chip-kind', '图'));
 		chip.append(el('span', 'context-chip-name', ref.name));
+		chip.title = ref.kind === 'image' ? `图片 · ${ref.uri}` : ref.uri;
 		const remove = button('×', `移除上下文 ${ref.name}`);
 		remove.className = 'context-chip-remove';
 		remove.addEventListener('click', () => {
@@ -1125,11 +1947,47 @@ function canSend(): boolean {
 
 function updateSendButton(): void {
 	const busy = state.ui.busy;
-	refs.btnSend.textContent = busy ? '■' : '➤';
-	refs.btnSend.classList.toggle('is-stop', busy);
-	refs.btnSend.disabled = !busy && !canSend();
-	refs.btnSend.title = busy ? '停止当前回复（Esc）' : '发送（Enter）';
+	const hasDraft = canSend();
+	refs.btnSend.textContent = '↑';
+	refs.btnSend.title = busy ? '排队发送（Enter）：当前回复结束后自动发送' : '发送（Enter）';
 	refs.btnSend.setAttribute('aria-label', refs.btnSend.title);
+	refs.btnSend.disabled = !hasDraft;
+	refs.btnStop.hidden = !busy;
+	refs.btnStop.disabled = !busy;
+	refs.btnSteer.hidden = !busy;
+	refs.btnSteer.disabled = !hasDraft;
+}
+
+/** 排队插话列表：每行显示模式（排队 / 引导）、正文与「引导 / 取消」操作。 */
+function renderPending(): void {
+	const list = state.ui.pending;
+	const bar = refs.pendingBar;
+	bar.replaceChildren();
+	bar.hidden = list.length === 0;
+	for (const item of list) {
+		const row = el('div', item.mode === 'steer' ? 'pending-item is-steer' : 'pending-item');
+		row.setAttribute('role', 'listitem');
+		row.dataset.pendingId = item.id;
+		row.append(el('span', 'pending-badge', item.mode === 'steer' ? '引导' : '排队'));
+		const text = el('span', 'pending-text', item.text.replace(/\s+/g, ' '));
+		text.title = item.text;
+		row.append(text);
+		if (item.mode !== 'steer') {
+			const steer = button('引导', '不打断当前回复，转为插队优先发送', 'pending-action');
+			steer.addEventListener('click', (event: MouseEvent) => {
+				event.stopPropagation();
+				post({ type: 'pendingAction', id: item.id, action: 'steer' });
+			});
+			row.append(steer);
+		}
+		const cancel = button('×', '取消这条排队消息', 'pending-action pending-cancel');
+		cancel.addEventListener('click', (event: MouseEvent) => {
+			event.stopPropagation();
+			post({ type: 'pendingAction', id: item.id, action: 'cancel' });
+		});
+		row.append(cancel);
+		bar.append(row);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,7 +1995,7 @@ function updateSendButton(): void {
 // ---------------------------------------------------------------------------
 
 function renderStatus(): void {
-	const { runtime, busy, session, usage, configOptions } = state.ui;
+	const { runtime, busy, session, usage } = state.ui;
 	const phase = runtime.phase;
 	refs.statusDot.className = `status-dot status-dot-${phase}${busy ? ' is-busy' : ''}`;
 	const title = headerTitle(session?.title, phase, busy);
@@ -1164,32 +2022,7 @@ function renderStatus(): void {
 	if (runtime.error) detail.push(runtime.error);
 	refs.statusDot.title = detail.join('\n');
 	refs.statusDot.setAttribute('aria-label', detail[0]);
-
-	const modelLabel = currentConfigLabel(findConfigOption(configOptions, 'model'));
-	if (modelLabel) {
-		refs.modelPill.hidden = false;
-		refs.modelPill.textContent = modelLabel;
-		refs.modelPill.title = `当前模型：${modelLabel}`;
-	} else {
-		refs.modelPill.hidden = true;
-		refs.modelPill.textContent = '';
-		refs.modelPill.title = '';
-	}
 	updateSendButton();
-}
-
-function closeMenu(): void {
-	refs.menu.hidden = true;
-	refs.menuButton.setAttribute('aria-expanded', 'false');
-}
-
-function toggleMenu(): void {
-	if (!refs.menu.hidden) {
-		closeMenu();
-		return;
-	}
-	refs.menu.hidden = false;
-	refs.menuButton.setAttribute('aria-expanded', 'true');
 }
 
 function formatHistoryMeta(info: { cwd: string; updatedAt?: string }): string {
@@ -1374,15 +2207,25 @@ function normalizeUiState(next: UiState): UiState {
 		history: Array.isArray(next.history) ? next.history : [],
 		usage: next.usage,
 		autoContext: normalizeAutoContext(next.autoContext),
+		mode: normalizeMode(next.mode),
+		autoReview: next.autoReview === true,
+		permissionMode: normalizePermissionMode(next.permissionMode),
+		fontScale: normalizeFontScale(next.fontScale),
+		pending: normalizePending(next.pending),
 	};
 }
 
 function renderAll(): void {
 	const stick = isNearBottom();
+	applyFontScale(state.ui.fontScale);
 	rebuildTranscript();
 	renderStatus();
 	renderFindings();
-	renderConfigOptions();
+	renderModeBadge();
+	renderPermissionChip();
+	renderModelChip();
+	renderPending();
+	renderComposerHint();
 	renderContextChips();
 	renderAutoContext();
 	renderEmptyState();
@@ -1463,10 +2306,13 @@ function handleMessage(raw: unknown): void {
 			state.ui.busy = Boolean(message.busy);
 			renderStatus();
 			renderEmptyState();
+			renderComposerHint();
+			updateSendButton();
 			return;
 		case 'usage':
 			state.ui.usage = message.usage;
 			renderStatus();
+			renderModelChip();
 			return;
 		case 'history':
 			state.ui.history = Array.isArray(message.history) ? message.history : [];
@@ -1475,7 +2321,7 @@ function handleMessage(raw: unknown): void {
 			return;
 		case 'configOptions':
 			state.ui.configOptions = Array.isArray(message.configOptions) ? message.configOptions : [];
-			renderConfigOptions();
+			renderModelChip();
 			renderStatus();
 			return;
 		case 'contextRefs':
@@ -1487,6 +2333,18 @@ function handleMessage(raw: unknown): void {
 		case 'autoContext':
 			state.ui.autoContext = normalizeAutoContext(message.info);
 			renderAutoContext();
+			return;
+		case 'prefs':
+			// 轻量回显：只更新输入区 chip / 提示与字号，不重建 transcript。
+			state.ui.mode = normalizeMode(message.mode);
+			state.ui.autoReview = message.autoReview === true;
+			state.ui.permissionMode = normalizePermissionMode(message.permissionMode);
+			state.ui.fontScale = normalizeFontScale(message.fontScale);
+			applyFontScale(state.ui.fontScale);
+			renderModeBadge();
+			renderPermissionChip();
+			renderModelChip();
+			renderComposerHint();
 			return;
 		case 'runtime':
 			if (message.runtime && typeof message.runtime === 'object') {
@@ -1517,52 +2375,55 @@ function autoSizeInput(): void {
 	updateSendButton();
 }
 
-function sendDraft(): void {
+function sendDraft(pendingMode?: 'queue' | 'steer'): void {
 	const text = refs.input.value.trim();
 	if (text.length === 0) {
 		refs.input.focus();
 		return;
 	}
+	// 斜杠指令在本地执行，不进入对话流。
+	const slash = parseSlashCommand(text);
+	if (slash) {
+		runSlashCommand(slash.command.id);
+		return;
+	}
+	closeSlashPalette();
 	// 运行时未就绪也允许发送：扩展侧会先 bootstrap 再发 prompt。
-	if (state.ui.runtime.phase !== 'ready') {
+	if (state.ui.runtime.phase !== 'ready' && !state.ui.busy) {
 		showToast('info', '正在启动 DSH 运行时，消息会在就绪后自动发送。');
 	}
+	// 正在回复（或已有排队）时提交 = 排队插话，不打断当前运行。
+	const queued = state.ui.busy || state.ui.pending.length > 0 ? (pendingMode ?? 'queue') : undefined;
 	const refsPayload = state.draftRefs.length > 0 ? [...state.draftRefs] : undefined;
-	post({ type: 'send', text, refs: refsPayload });
+	post({ type: 'send', text, refs: refsPayload, pendingMode: queued });
 	refs.input.value = '';
 	state.draftRefs = [];
 	renderContextChips();
 	autoSizeInput();
-}
-
-function menuItem(label: string, title: string, run: () => void): HTMLButtonElement {
-	const item = button(label, title, 'menu-item');
-	item.setAttribute('role', 'menuitem');
-	item.addEventListener('click', (event: MouseEvent) => {
-		// 阻止冒泡到 document：否则「会话历史」打开后会被外部点击逻辑立刻关掉。
-		event.stopPropagation();
-		closeMenu();
-		run();
-	});
-	return item;
+	updateSendButton();
 }
 
 function wireUi(): void {
-	const menuItems: [string, string, () => void][] = [
-		['新建会话', '新建一个 DSH 会话', () => post({ type: 'newSession' })],
-		['会话历史', '查看并恢复历史会话', () => toggleHistoryPanel()],
-		['本轮改动', '查看本轮改动 diff', () => post({ type: 'runCommand', command: 'showTurnChanges' })],
-		['兼容性诊断', '生成兼容性诊断报告', () => post({ type: 'runCommand', command: 'diagnose' })],
-		['重启运行时', '重启 DSH 运行时', () => post({ type: 'restartRuntime' })],
-		['打开设置', '打开 DeepSeek Harness 设置', () => post({ type: 'openSettings' })],
-	];
-	for (const [label, title, run] of menuItems) refs.menu.append(menuItem(label, title, run));
-
 	refs.menuButton.addEventListener('click', (event: MouseEvent) => {
 		event.stopPropagation();
-		toggleMenu();
+		openTopbarMenu();
 	});
-	refs.btnPickContext.addEventListener('click', () => post({ type: 'pickContext' }));
+	refs.btnPickContext.addEventListener('click', (event: MouseEvent) => {
+		event.stopPropagation();
+		openPlusMenu();
+	});
+	refs.modeBadge.addEventListener('click', (event: MouseEvent) => {
+		event.stopPropagation();
+		openPlusMenu(refs.modeBadge);
+	});
+	refs.permissionChip.addEventListener('click', (event: MouseEvent) => {
+		event.stopPropagation();
+		openPermissionMenu();
+	});
+	refs.modelChip.addEventListener('click', (event: MouseEvent) => {
+		event.stopPropagation();
+		openModelPanelMenu();
+	});
 	refs.btnFindingsFix.addEventListener('click', () => post({ type: 'runCommand', command: 'fixFindings' }));
 	refs.btnFindingsClear.addEventListener('click', () => post({ type: 'clearFindings' }));
 	refs.findingsToggle.addEventListener('click', () => {
@@ -1570,10 +2431,9 @@ function wireUi(): void {
 		renderFindings();
 	});
 	refs.jumpButton.addEventListener('click', jumpToBottom);
-	refs.btnSend.addEventListener('click', () => {
-		if (state.ui.busy) post({ type: 'cancel' });
-		else sendDraft();
-	});
+	refs.btnSend.addEventListener('click', () => sendDraft());
+	refs.btnStop.addEventListener('click', () => post({ type: 'cancel' }));
+	refs.btnSteer.addEventListener('click', () => sendDraft('steer'));
 	refs.bannerClose.addEventListener('click', hideBanner);
 
 	refs.scroll.addEventListener('scroll', () => {
@@ -1582,40 +2442,100 @@ function wireUi(): void {
 	});
 
 	refs.input.addEventListener('keydown', (event: KeyboardEvent) => {
+		// 斜杠面板打开时：方向键移动高亮、Enter/Tab 执行、Esc 只关面板。
+		if (slashPaletteOpen) {
+			if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+				event.preventDefault();
+				moveSlashHighlight(event.key === 'ArrowDown' ? 1 : -1);
+				return;
+			}
+			if (event.key === 'Enter' || event.key === 'Tab') {
+				if (event.isComposing || event.keyCode === 229) return;
+				event.preventDefault();
+				const id = slashPaletteIds[slashPaletteIndex];
+				if (id) runSlashCommand(id);
+				return;
+			}
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				// 斜杠面板的 Esc 不能继续触发「停止生成」。
+				event.stopPropagation();
+				closeSlashPalette();
+				return;
+			}
+		}
 		if (event.key !== 'Enter' || event.shiftKey) return;
 		// 输入法组词时的 Enter 不能当成发送。
 		if (event.isComposing || event.keyCode === 229) return;
 		event.preventDefault();
-		if (state.ui.busy) {
-			showToast('info', '正在处理中，可点击「停止」中断。');
-			return;
-		}
-		sendDraft();
+		// Ctrl+Enter = 引导（插队优先发送，不打断当前回复）。
+		sendDraft(event.ctrlKey || event.metaKey ? 'steer' : undefined);
 	});
-	refs.input.addEventListener('input', autoSizeInput);
+	refs.input.addEventListener('input', () => {
+		autoSizeInput();
+		syncSlashPalette();
+	});
 
-	refs.modelSelect.addEventListener('change', () => handleConfigChange(refs.modelSelect));
-	refs.reasoningSelect.addEventListener('change', () => handleConfigChange(refs.reasoningSelect));
+	// 拖入附件：资源管理器的文件拖到输入卡片上（图片走 image 内容块）。
+	const shell = refs.composerShell;
+	shell.addEventListener('dragover', (event: DragEvent) => {
+		const types = event.dataTransfer?.types ?? [];
+		if (!types.includes('text/uri-list') && !types.includes('Files')) return;
+		event.preventDefault();
+		shell.classList.add('is-drop-target');
+	});
+	shell.addEventListener('dragleave', () => shell.classList.remove('is-drop-target'));
+	shell.addEventListener('drop', (event: DragEvent) => {
+		shell.classList.remove('is-drop-target');
+		if (!event.dataTransfer) return;
+		const uris = event.dataTransfer
+			.getData('text/uri-list')
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0 && !line.startsWith('#'));
+		if (uris.length === 0) return;
+		event.preventDefault();
+		let added = 0;
+		let unsupported = 0;
+		for (const uri of uris) {
+			if (!uri.startsWith('file:')) continue;
+			if (isUnsupportedMediaPath(uri)) {
+				unsupported += 1;
+				continue;
+			}
+			if (state.draftRefs.some((ref) => ref.uri === uri)) continue;
+			const mime = imageMimeType(uri);
+			state.draftRefs.push({
+				name: refNameFromUri(uri),
+				uri,
+				kind: mime ? 'image' : 'file',
+				mimeType: mime,
+			});
+			added += 1;
+		}
+		renderContextChips();
+		updateSendButton();
+		if (added > 0) showToast('info', `已添加 ${added} 个附件`);
+		else if (unsupported > 0) showToast('warn', '暂不支持音频/视频，仅支持 PNG/JPEG/WebP/GIF 图片');
+	});
 
-	// 点击面板外关闭菜单/历史下拉。
+	// 点击外部关闭历史下拉（popover 的外部点击由 menu.ts 处理）。
 	document.addEventListener('click', (event: MouseEvent) => {
 		const target = event.target as Node | null;
 		if (!target) return;
-		if (
-			!refs.menu.hidden &&
-			!refs.menu.contains(target) &&
-			!refs.menuButton.contains(target)
-		) {
-			closeMenu();
-		}
-		if (!refs.historyPanel.hidden && !refs.historyPanel.contains(target)) {
-			hideHistoryPanel();
-		}
+		if (!refs.historyPanel.hidden && !refs.historyPanel.contains(target)) hideHistoryPanel();
 	});
 	window.addEventListener('keydown', (event: KeyboardEvent) => {
+		// 输入法组词时的 Esc 只取消候选，不能当成「停止回复」。
+		if (event.isComposing) return;
 		if (event.key !== 'Escape') return;
-		if (!refs.menu.hidden) {
-			closeMenu();
+		// 顺序：斜杠面板 → popover 菜单 → 历史面板 → 取消生成。
+		if (slashPaletteOpen) {
+			closeSlashPalette();
+			return;
+		}
+		if (isPopoverMenuOpen()) {
+			closePopoverMenu();
 			return;
 		}
 		if (!refs.historyPanel.hidden) {

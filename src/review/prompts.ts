@@ -45,12 +45,30 @@ export interface PromptSelectionTarget extends PromptFileRef {
 	totalLines: number;
 }
 
+/**
+ * A file created during the reviewed turn (untracked). It has no diff, so its
+ * content is embedded inline with real line numbers instead.
+ */
+export interface PromptNewFile {
+	/** Workspace-relative POSIX path. */
+	path: string;
+	/** Full file text (rendered with real 1-based line numbers). */
+	text: string;
+	languageId?: string;
+	/** Total file lines, for the agent's context. */
+	totalLines: number;
+	/** Set when the caller already truncated the text. */
+	truncated?: boolean;
+}
+
 export interface PromptDiffTarget {
 	kind: 'diff';
 	diffKind: 'working' | 'staged' | 'commit';
 	/** Unified diff text (may already be truncated by git.ts). */
 	text: string;
 	files: readonly PromptFileRef[];
+	/** Files created this turn; their content is embedded after the diff. */
+	newFiles?: readonly PromptNewFile[];
 	sha?: string;
 	subject?: string;
 	truncated?: boolean;
@@ -267,17 +285,79 @@ function buildSelectionSection(target: PromptSelectionTarget, budget: number, ki
 	return fencedSection(headerLines, sanitizeLanguage(target.languageId), target.text, budget, target.startLine);
 }
 
+/** Merge diff file refs with new-file paths for the "涉及文件" header line. */
+function diffFileList(target: PromptDiffTarget): string {
+	const paths: string[] = [];
+	for (const file of target.files) {
+		if (!paths.includes(file.path)) paths.push(file.path);
+	}
+	for (const file of target.newFiles ?? []) {
+		if (!paths.includes(file.path)) paths.push(file.path);
+	}
+	return paths.join('、') || '（未能解析文件名）';
+}
+
+/**
+ * Section that embeds the content of files created during this turn (they have
+ * no diff, so the agent would otherwise never see them). The body shares the
+ * remaining prompt budget with the diff and keeps real line numbers so
+ * findings still point at the right lines.
+ */
+function buildNewFilesSection(newFiles: readonly PromptNewFile[], budget: number): string {
+	// Below this the section header alone would overflow the shared budget.
+	if (budget < 120) return '';
+	let text = [
+		'## 本轮新建文件（内容内嵌）',
+		'以下文件是本轮新建、尚未纳入版本库的文件，没有 diff，已按真实行号内嵌内容：',
+	].join('\n');
+	for (let index = 0; index < newFiles.length; index += 1) {
+		const file = newFiles[index];
+		const remaining = budget - text.length - 2;
+		if (remaining < 160) {
+			// Stay within the prompt budget, but say what was dropped.
+			const rest = newFiles.length - index;
+			const note = `- 已截断：其余 ${rest} 个新建文件因提示词长度限制未展开。`;
+			if (remaining >= note.length) text += `\n\n${note}`;
+			break;
+		}
+		const headerLines = [
+			`### ${file.path}`,
+			`- 路径：${file.path}`,
+			file.languageId ? `- 语言：${file.languageId}` : '',
+			`- 总行数：${file.totalLines}`,
+			'- 每行前缀是文件的真实行号（从 1 开始），引用问题时必须使用该行号。',
+			file.truncated ? '- 注意：文件内容已按长度截断，可能不完整。' : '',
+		].filter((line) => line !== '');
+		const section = fencedSection(headerLines, sanitizeLanguage(file.languageId), file.text, remaining, 1);
+		if (section.length > remaining - 2) {
+			// Degenerate budget (e.g. a very long path): keep a compact pointer instead.
+			const compact = `### ${file.path}\n- 总行数：${file.totalLines}\n- 已截断：提示词长度不足，内容未内嵌。`;
+			if (compact.length <= remaining) text += `\n\n${compact}`;
+			break;
+		}
+		text += `\n\n${section}`;
+	}
+	return text;
+}
+
 function buildDiffSection(target: PromptDiffTarget, budget: number): string {
-	const fileList = target.files.map((file) => file.path).join('、') || '（未能解析文件名）';
 	const headerLines = [
 		'## 待审查改动',
 		`- 范围：${diffScopeLabel(target)}`,
 		target.subject ? `- 提交说明：${target.subject}` : '',
-		`- 涉及文件：${fileList}`,
+		`- 涉及文件：${diffFileList(target)}`,
 		'- diff 中 `+` 为新增行、`-` 为删除行；行号见 hunk 头 `@@ -旧起始,行数 +新起始,行数 @@`。',
 		target.truncated ? '- 注意：diff 已按长度截断，可能不完整。' : '',
 	].filter((line) => line !== '');
-	return fencedSection(headerLines, 'diff', target.text, budget);
+	const hasDiff = target.text.trim().length > 0;
+	const diffSection = hasDiff
+		? fencedSection(headerLines, 'diff', target.text, budget)
+		: `${headerLines.join('\n')}\n\n- 本次改动均为新建文件，没有 diff 内容，内容见下方内嵌段落。`;
+	const newFiles = target.newFiles ?? [];
+	if (newFiles.length === 0) return diffSection;
+	const remaining = budget - diffSection.length - 2;
+	if (remaining < 120) return diffSection;
+	return `${diffSection}\n\n${buildNewFilesSection(newFiles, remaining)}`;
 }
 
 /** Section title that names the task scope explicitly (single file vs selection). */

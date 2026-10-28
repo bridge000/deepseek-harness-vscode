@@ -12,7 +12,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ContextRef, Finding } from '../types';
 import type { ChatViewDeps, ChatViewProvider } from './contract';
-import { isCommandId, isWebviewToExt } from './protocol';
+import { isCommandId, isPermissionMode, isSessionMode, isWebviewToExt } from './protocol';
 import type { ExtToWeb, WebviewToExt } from './protocol';
 
 /** 与 package.json `contributes.views.deepseekHarness[0].id` 保持一致。 */
@@ -33,9 +33,13 @@ function normalizeRefs(value: unknown): ContextRef[] {
 	const refs: ContextRef[] = [];
 	for (const item of value) {
 		if (typeof item !== 'object' || item === null) continue;
-		const ref = item as { name?: unknown; uri?: unknown };
+		const ref = item as { name?: unknown; uri?: unknown; kind?: unknown; mimeType?: unknown };
 		if (typeof ref.name !== 'string' || typeof ref.uri !== 'string') continue;
-		refs.push({ name: ref.name, uri: ref.uri });
+		const contextRef: ContextRef = { name: ref.name, uri: ref.uri };
+		if (ref.kind === 'image') contextRef.kind = 'image';
+		else if (ref.kind === 'file') contextRef.kind = 'file';
+		if (typeof ref.mimeType === 'string' && ref.mimeType.length > 0) contextRef.mimeType = ref.mimeType;
+		refs.push(contextRef);
 	}
 	return refs;
 }
@@ -200,7 +204,14 @@ class ChatViewProviderImpl implements ChatViewProvider {
 				return;
 			case 'send': {
 				if (typeof message.text !== 'string' || message.text.trim().length === 0) return;
-				await controller.send(message.text, normalizeRefs(message.refs));
+				const pendingMode = message.pendingMode === 'steer' || message.pendingMode === 'queue' ? message.pendingMode : undefined;
+				await controller.send(message.text, normalizeRefs(message.refs), pendingMode);
+				return;
+			}
+			case 'pendingAction': {
+				if (typeof message.id !== 'string' || message.id.length === 0) return;
+				if (message.action !== 'steer' && message.action !== 'cancel') return;
+				controller.pendingAction(message.id, message.action);
 				return;
 			}
 			case 'cancel':
@@ -229,6 +240,33 @@ class ChatViewProviderImpl implements ChatViewProvider {
 			case 'setAutoContext': {
 				if (typeof message.enabled !== 'boolean') return;
 				controller.setAutoContext(message.enabled);
+				return;
+			}
+			case 'setMode': {
+				if (!isSessionMode(message.mode)) {
+					this.log('[聊天视图] 忽略未知协作模式');
+					return;
+				}
+				controller.setMode(message.mode);
+				return;
+			}
+			case 'setAutoReview': {
+				if (typeof message.enabled !== 'boolean') return;
+				controller.setAutoReview(message.enabled);
+				return;
+			}
+			case 'setPermissionMode': {
+				if (!isPermissionMode(message.mode)) {
+					this.log('[聊天视图] 忽略未知权限预设');
+					return;
+				}
+				await controller.setPermissionMode(message.mode);
+				return;
+			}
+			case 'setFontScale': {
+				if (typeof message.value !== 'number' || !Number.isFinite(message.value)) return;
+				if (message.value < 0.8 || message.value > 1.8) return;
+				await controller.setFontScale(message.value);
 				return;
 			}
 			case 'pickContext': {

@@ -9,6 +9,10 @@ export interface ContextRef {
 	name: string;
 	/** `file:` URI string understood by ACP `resource_link` blocks. */
 	uri: string;
+	/** `image` refs are embedded as ACP image content blocks instead of links. */
+	kind?: 'file' | 'image';
+	/** MIME type for image refs, e.g. `image/png`. */
+	mimeType?: string;
 }
 
 /** What the auto-context collector picked from the focused editor. */
@@ -29,6 +33,20 @@ export interface AutoContextInfo {
 }
 
 export type Severity = 'error' | 'warning' | 'info';
+
+/**
+ * Client-side collaboration mode. ACP exposes no session-mode surface (only
+ * `model` / `reasoning_effort` config options), so the mode is realized by
+ * prompt guidance plus a permission gate in this extension.
+ */
+export type SessionMode = 'agent' | 'plan' | 'goal';
+
+/**
+ * DSH sandbox + approval preset. ACP cannot switch it at runtime, so the
+ * extension applies it through the `DSH_PERMISSION_MODE` environment variable
+ * when the runtime (re)starts.
+ */
+export type PermissionMode = 'workspace-write' | 'read-only' | 'danger-full-access';
 
 /** One reviewed problem produced by the agent (parsed from its JSON contract). */
 export interface Finding {
@@ -148,10 +166,23 @@ export interface PermissionRequest {
 	options: PermissionOptionInfo[];
 }
 
+/** A message queued while the agent is busy (排队插话). */
+export interface PendingMessage {
+	id: string;
+	text: string;
+	refs?: ContextRef[];
+	/** `steer` jumps ahead of `queue` items; neither interrupts the running turn. */
+	mode: 'queue' | 'steer';
+	at: number;
+}
+
 export interface UsageInfo {
 	inputTokens?: number;
 	outputTokens?: number;
+	/** Context-window tokens used (`usage_update.used`). */
 	totalTokens?: number;
+	/** Context-window size (`usage_update.size`) when the agent reports it. */
+	contextSize?: number;
 }
 
 /** Everything the webview needs to render itself. */
@@ -166,4 +197,14 @@ export interface UiState {
 	usage?: UsageInfo;
 	/** Current auto-context selection shown above the composer. */
 	autoContext?: AutoContextInfo;
+	/** Collaboration mode selected in the composer (client-side). */
+	mode: SessionMode;
+	/** Review the turn's changes automatically once it settles. */
+	autoReview: boolean;
+	/** Effective permission preset (applied when the runtime starts). */
+	permissionMode: PermissionMode;
+	/** Sidebar font scale from `deepseekHarness.fontScale` (1 = 跟随 VS Code). */
+	fontScale: number;
+	/** Messages queued while the agent is busy (排队插话), in send order. */
+	pending: PendingMessage[];
 }

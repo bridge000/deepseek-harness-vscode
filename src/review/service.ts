@@ -10,6 +10,7 @@ import { readFileSync, statSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import * as vscode from 'vscode';
 import { workspaceRootUri } from '../config';
+import { imageMimeType, isImagePath, refNameFromUri } from '../context/media';
 import type { ContextRef, Finding } from '../types';
 import { createChangeTracker } from './changes';
 import type { DiffKind, ReviewInput, ReviewKind, ReviewService, ReviewServiceDeps } from './contracts';
@@ -22,13 +23,17 @@ import {
 	type PromptDiffTarget,
 	type PromptFileRef,
 	type PromptFileTarget,
+	type PromptNewFile,
 	type PromptSelectionTarget,
 } from './prompts';
+import { buildTurnDiffPrompt, partitionTurnPaths, toPathspecs } from './turnDiff';
 
 /** Lines of context kept before/after a selection. */
 const SELECTION_CONTEXT_LINES = 20;
 /** Refuse to parse findings line counts for huge (likely generated) files. */
 const MAX_LINE_COUNT_FILE_BYTES = 2 * 1024 * 1024;
+/** New files bigger than this are listed but not embedded in the review prompt. */
+const MAX_NEW_FILE_BYTES = 200 * 1024;
 
 /** Extensions that `openTextDocument` may open but that are not reviewable text. */
 const BINARY_EXTENSIONS = new Set([
@@ -63,6 +68,52 @@ function relativePath(root: string, filePath: string): string {
 function absolutePath(root: string, filePath: string): string {
 	if (isAbsoluteFilePath(filePath)) return toPosix(filePath);
 	return nodePath.join(root, filePath);
+}
+
+/**
+ * Quick pick entry: a workspace file, or the "pick images from disk" action.
+ * NB: `kind` is already taken by VS Code's `QuickPickItemKind` (separators), so
+ * the custom discriminator is called `pickKind`.
+ */
+interface ContextPickItem extends vscode.QuickPickItem {
+	pickKind: 'file' | 'disk';
+	uri?: vscode.Uri;
+}
+
+/**
+ * Context ref for a picked URI: supported raster images become `kind: 'image'`
+ * refs (the caller embeds them as ACP image content blocks), everything else
+ * stays a plain file link.
+ */
+function imageOrFileRef(root: string, uri: vscode.Uri): ContextRef {
+	const mimeType = imageMimeType(uri.fsPath);
+	const relative = relativePath(root, uri.fsPath);
+	if (!mimeType) return { name: relative, uri: uri.toString() };
+	// Images picked from disk may live outside the workspace: use the file name.
+	const name = isAbsoluteFilePath(relative) ? refNameFromUri(uri.toString()) : relative;
+	return { name, uri: uri.toString(), kind: 'image', mimeType };
+}
+
+/**
+ * Strip the repo prefix (git reports it with a trailing slash) so a
+ * repo-relative path can be joined onto the workspace root. `undefined` when
+ * the path lives outside the workspace folder.
+ */
+function workspaceRelativeFromRepo(repoPrefix: string, repoFile: string): string | undefined {
+	const normalized = toPosix(repoFile);
+	if (!repoPrefix) return normalized || undefined;
+	const prefix = repoPrefix.endsWith('/') ? repoPrefix : `${repoPrefix}/`;
+	if (!normalized.startsWith(prefix)) return undefined;
+	return normalized.slice(prefix.length) || undefined;
+}
+
+/** Count lines the way the editor does (newline count + 1). */
+function countTextLines(text: string): number {
+	let lines = 1;
+	for (let index = 0; index < text.length; index += 1) {
+		if (text.charCodeAt(index) === 10) lines += 1;
+	}
+	return lines;
 }
 
 function samePath(left: string, right: string): boolean {
@@ -244,7 +295,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
 		const repoPrefix = await git.repoPrefix(root);
 		const files: PromptFileRef[] = [];
 		for (const repoFile of result.files) {
-			const workspaceRelative = repoPrefix ? (repoFile.startsWith(repoPrefix) ? repoFile.slice(repoPrefix.length) : undefined) : repoFile;
+			const workspaceRelative = workspaceRelativeFromRepo(repoPrefix, repoFile);
 			if (!workspaceRelative) continue;
 			files.push({
 				path: workspaceRelative,
@@ -264,6 +315,102 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
 		return buildReviewPrompt(target, { maxChars: deps.maxReviewChars });
 	}
 
+	/**
+	 * "Review this turn's changes": the diff is limited to the paths that the
+	 * turn touched, and untracked (newly created) files are embedded inline
+	 * because `git diff HEAD` never shows them.
+	 *
+	 * Called automatically after every turn, so it degrades silently: no
+	 * workspace / non-git / empty turn all return `undefined` without dialogs.
+	 */
+	async function collectTurnDiff(paths: readonly string[]): Promise<ReviewInput | undefined> {
+		const root = rootPath();
+		if (!root) return undefined;
+		if (!(await git.isGitRepo(root))) return undefined;
+
+		const repoPrefix = await git.repoPrefix(root);
+		const status = await git.statusPorcelain(root);
+		const partition = partitionTurnPaths(status, paths, repoPrefix);
+
+		let diffResult: git.GitDiffResult = { text: '', files: [], truncated: false };
+		if (partition.tracked.length > 0) {
+			const specs = toPathspecs(repoPrefix, partition.tracked);
+			diffResult = await git.diffPaths(root, specs, deps.maxReviewChars);
+		}
+
+		const files: PromptFileRef[] = [];
+		const seenFiles = new Set<string>();
+		const addFileRef = (workspaceRelative: string): void => {
+			if (!workspaceRelative || seenFiles.has(workspaceRelative)) return;
+			seenFiles.add(workspaceRelative);
+			files.push({
+				path: workspaceRelative,
+				uri: vscode.Uri.file(nodePath.join(root, workspaceRelative)).toString(),
+			});
+		};
+		for (const repoFile of diffResult.files) {
+			const workspaceRelative = workspaceRelativeFromRepo(repoPrefix, repoFile);
+			if (workspaceRelative) addFileRef(workspaceRelative);
+		}
+
+		// Embed new file contents, sharing the prompt budget with the diff.
+		const newFiles: PromptNewFile[] = [];
+		let usedChars = diffResult.text.length;
+		let newFilesTruncated = false;
+		for (const repoPath of partition.untracked) {
+			const workspaceRelative = workspaceRelativeFromRepo(repoPrefix, repoPath);
+			if (!workspaceRelative) continue;
+			const filePath = nodePath.join(root, workspaceRelative);
+			let size = 0;
+			try {
+				const stat = statSync(filePath);
+				if (!stat.isFile()) {
+					partition.skipped.push({ path: repoPath, reason: '不是普通文件，未内嵌内容' });
+					continue;
+				}
+				size = stat.size;
+			} catch (error) {
+				partition.skipped.push({ path: repoPath, reason: `无法读取文件信息：${String(error)}` });
+				continue;
+			}
+			if (size > MAX_NEW_FILE_BYTES) {
+				partition.skipped.push({ path: repoPath, reason: '文件过大（超过 200KB），未内嵌内容' });
+				continue;
+			}
+			let text: string;
+			try {
+				text = readFileSync(filePath, 'utf8');
+			} catch (error) {
+				partition.skipped.push({ path: repoPath, reason: `无法读取文件内容：${String(error)}` });
+				continue;
+			}
+			if (text.includes('\0')) {
+				partition.skipped.push({ path: repoPath, reason: '二进制文件，未内嵌内容' });
+				continue;
+			}
+			if (usedChars + text.length > deps.maxReviewChars) {
+				partition.skipped.push({ path: repoPath, reason: '提示词长度已达上限，未内嵌内容' });
+				newFilesTruncated = true;
+				break;
+			}
+			usedChars += text.length;
+			newFiles.push({ path: workspaceRelative, text, totalLines: countTextLines(text) });
+			addFileRef(workspaceRelative);
+		}
+
+		for (const item of partition.skipped) {
+			deps.log.info(`本轮审查跳过 ${item.path}：${item.reason}`);
+		}
+
+		return buildTurnDiffPrompt({
+			diffText: diffResult.text,
+			files,
+			newFiles,
+			truncated: diffResult.truncated || newFilesTruncated,
+			maxChars: deps.maxReviewChars,
+		});
+	}
+
 	async function pickContextFiles(): Promise<ContextRef[]> {
 		const root = rootPath();
 		if (!root) {
@@ -271,20 +418,54 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
 			return [];
 		}
 		const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,dist,out,coverage}/**', 200);
-		const items = uris
-			.map((uri) => ({
-				label: relativePath(root, uri.fsPath),
-				description: uri.fsPath,
-				uri,
-			}))
+		const fileItems: ContextPickItem[] = uris
+			.map((uri) => {
+				const mimeType = imageMimeType(uri.fsPath);
+				const description = mimeType
+					? `${uri.fsPath} · 图片，将作为图像内容附加`
+					: uri.fsPath;
+				return {
+					label: relativePath(root, uri.fsPath),
+					description,
+					pickKind: 'file' as const,
+					uri,
+				};
+			})
 			.sort((left, right) => left.label.localeCompare(right.label));
-		const picked = await vscode.window.showQuickPick(items, {
+		// 置顶项：工作区里找不到的图片（或截图目录）直接从磁盘选。
+		const diskItem: ContextPickItem = {
+			label: '$(file-media) 从磁盘选择图片…',
+			description: 'PNG / JPEG / WebP / GIF',
+			pickKind: 'disk',
+			alwaysShow: true,
+		};
+		const picked = await vscode.window.showQuickPick<ContextPickItem>([diskItem, ...fileItems], {
 			canPickMany: true,
-			title: '选择要附加到消息的文件',
-			placeHolder: '可多选；将以资源链接形式加入下一条消息',
+			title: '选择要附加到消息的文件或图片',
+			placeHolder: '可多选；图片会作为图像内容附加，其它以资源链接形式加入下一条消息',
 		});
 		if (!picked) return [];
-		return picked.map((item) => ({ name: item.label, uri: item.uri.toString() }));
+		const refs: ContextRef[] = [];
+		for (const item of picked) {
+			if (item.pickKind === 'disk') {
+				const selected = await vscode.window.showOpenDialog({
+					canSelectMany: true,
+					openLabel: '选择图片',
+					filters: { 图片: ['png', 'jpg', 'jpeg', 'webp', 'gif'] },
+				});
+				if (!selected) continue;
+				for (const uri of selected) {
+					if (!isImagePath(uri.fsPath)) {
+						deps.log.warn(`跳过非图片文件：${uri.fsPath}`);
+						continue;
+					}
+					refs.push(imageOrFileRef(root, uri));
+				}
+				continue;
+			}
+			if (item.uri) refs.push(imageOrFileRef(root, item.uri));
+		}
+		return refs;
 	}
 
 	async function publishFindings(label: string, markdown: string): Promise<Finding[]> {
@@ -333,6 +514,9 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
 		},
 		collectDiff(kind) {
 			return collectDiff(kind);
+		},
+		collectTurnDiff(paths) {
+			return collectTurnDiff(paths);
 		},
 		pickContextFiles,
 		publishFindings,

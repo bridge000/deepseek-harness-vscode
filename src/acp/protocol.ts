@@ -89,11 +89,20 @@ export interface ContentResourceLink {
 	mimeType?: string;
 	description?: string;
 }
+export interface ContentImage {
+	type: 'image';
+	/** Base64-encoded image bytes. */
+	data: string;
+	/** MIME type, e.g. `image/png`. */
+	mimeType: string;
+	/** Optional source URI for reference/logging. */
+	uri?: string;
+}
 export interface UnknownContentBlock {
 	type: string;
 	[key: string]: unknown;
 }
-export type ContentBlock = ContentText | ContentResourceLink | UnknownContentBlock;
+export type ContentBlock = ContentText | ContentResourceLink | ContentImage | UnknownContentBlock;
 
 export interface AcpNewSessionParams {
 	cwd: string;

@@ -63,6 +63,11 @@ export interface PromptOutcome {
 	stopReason: string;
 }
 
+export interface PromptDisplayOptions {
+	/** 'auto' = summarize blocks (default); 'none' = no user entry; string = exact bubble text. */
+	userEntry?: 'auto' | 'none' | string;
+}
+
 export type SessionEvent =
 	| { type: 'entry'; entry: TranscriptEntry }
 	| { type: 'entryPatch'; id: string; patch: Partial<TranscriptEntry> }
@@ -90,7 +95,7 @@ export interface SessionService {
 	resume(sessionId: string, cwd?: string): Promise<ActiveSession>;
 	list(cwd?: string): Promise<SessionInfo[]>;
 	setConfig(configId: string, value: unknown): Promise<ConfigOption[]>;
-	prompt(sessionId: string, blocks: ContentBlock[]): Promise<PromptOutcome>;
+	prompt(sessionId: string, blocks: ContentBlock[], options?: PromptDisplayOptions): Promise<PromptOutcome>;
 	cancel(sessionId?: string): void;
 	close(): Promise<void>;
 	dispose(): Promise<void>;
